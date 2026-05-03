@@ -85,8 +85,6 @@ func (o *Orchestrator) runTurnLoop(
 	sess agent.Session,
 	log *observability.Logger,
 ) error {
-	_ = ws // reserved for future use (e.g. between_turns hook cwd)
-
 	maxTurns := o.cfg.Agent.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 20
@@ -97,7 +95,9 @@ func (o *Orchestrator) runTurnLoop(
 		terminalSet[strings.ToLower(s)] = true
 	}
 
-	var feedback string // Phase 7 fills this from between_turns hook output.
+	// feedback holds between_turns hook output to inject into the next turn's prompt.
+	// It is local to this goroutine — no lock required.
+	var feedback string
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		// Check context cancellation before each turn.
@@ -153,13 +153,10 @@ func (o *Orchestrator) runTurnLoop(
 			"tokens_total", result.Tokens.TotalTokens,
 		)
 
-		// Reset feedback for next turn (Phase 7 will populate from between_turns hook).
-		feedback = ""
-
 		switch result.Status {
 		case agent.TurnCompleted:
-			// Completed successfully — done.
-			return nil
+			// Issue is still active — run between_turns hook before continuing.
+			feedback = o.runBetweenTurnsHook(ctx, ws, log, turn)
 		case agent.TurnCancelled:
 			return ctx.Err()
 		case agent.TurnFailed:
@@ -179,15 +176,75 @@ func buildFirstTurnPrompt(issue domain.Issue, o *Orchestrator) (string, error) {
 	return prompt.Render(o.promptTemplate, prompt.Vars{Issue: issue})
 }
 
-// buildContinuationPrompt builds the prompt for turns > 1.
-// Phase 7 fills in the feedback section; for Phase 1 feedback is always empty.
+// buildContinuationPrompt builds the prompt for turns > 1 per SPEC §12.3.
+// If feedback is non-empty, appends a "Validation feedback" section.
 func buildContinuationPrompt(turnNumber, maxTurns int, feedback string) string {
-	s := fmt.Sprintf(
-		"Continuing work (turn %d of %d). Please continue where you left off.",
-		turnNumber, maxTurns,
-	)
+	s := fmt.Sprintf(`Continuation guidance:
+
+- The previous agent turn completed normally, but the issue is still in an active state.
+- This is continuation turn #%d of %d.
+- Resume from the current workspace state instead of restarting from scratch.`, turnNumber, maxTurns)
+
 	if feedback != "" {
-		s += "\n\n## Validation feedback (between_turns hook, last turn):\n```\n" + feedback + "\n```"
+		s += fmt.Sprintf(`
+
+Validation feedback (between_turns hook, last turn):
+
+`+"```"+`
+%s
+`+"```"+`
+
+Address these findings before continuing the original task.`, feedback)
 	}
 	return s
+}
+
+// runBetweenTurnsHook runs the between_turns hook (if configured) after a
+// completed turn. It returns the feedback string to inject into the next turn's
+// continuation prompt. It never aborts the run — failures are logged-and-ignored
+// per SPEC §5.3.4.
+func (o *Orchestrator) runBetweenTurnsHook(
+	ctx context.Context,
+	ws domain.Workspace,
+	log *observability.Logger,
+	turn int,
+) string {
+	if o.cfg.Hooks.BetweenTurns == "" {
+		return ""
+	}
+
+	timeout := time.Duration(o.cfg.Hooks.TimeoutMs) * time.Millisecond
+	result, hookErr := o.ws.RunHook(ctx, ws, o.cfg.Hooks.BetweenTurns, timeout)
+
+	if hookErr != nil {
+		log.Warn("between_turns hook error (ignored)", "turn", turn, "err", fmt.Sprintf("%v", hookErr))
+		return ""
+	}
+
+	if result.TimedOut {
+		log.Warn("between_turns hook timed out (ignored)", "turn", turn, "timeout_ms", o.cfg.Hooks.TimeoutMs)
+		stdout := truncateOutput(result.Stdout, 4*1024-100)
+		return fmt.Sprintf("<hook timed out after %dms>\n%s", o.cfg.Hooks.TimeoutMs, stdout)
+	}
+
+	if result.ExitCode != 0 {
+		log.Warn("between_turns hook failed (non-zero exit, feedback captured)",
+			"turn", turn,
+			"exit_code", result.ExitCode,
+		)
+		return truncateOutput(result.Stdout, 4*1024)
+	}
+
+	log.Info("between_turns hook succeeded", "turn", turn)
+	return ""
+}
+
+// truncateOutput truncates output to at most maxBytes. If truncated, appends a
+// marker line.
+func truncateOutput(out []byte, maxBytes int) string {
+	if len(out) <= maxBytes {
+		return string(out)
+	}
+	truncated := string(out[:maxBytes])
+	return truncated + "\n... [truncated, full output suppressed]\n"
 }

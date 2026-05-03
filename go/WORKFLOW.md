@@ -19,7 +19,11 @@ hooks:
   before_run: ""
   after_run: ""
   before_remove: ""
-  # between_turns: "golangci-lint run --out-format=line-number"
+  # Optional: run golangci-lint between agent turns. Stdout from a non-zero exit
+  # is fed into the next turn's continuation prompt under a "Validation feedback"
+  # heading. The run never aborts on hook failure alone.
+  # between_turns: |
+  #   golangci-lint run --out-format=line-number
   timeout_ms: 60000
 
 agent:
