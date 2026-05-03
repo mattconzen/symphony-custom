@@ -348,6 +348,20 @@ func Preflight(cfg Config) error {
 		return ErrBetweenTurnsRequiresTimeout
 	}
 
+	// Tracker-kind-specific required fields per SPEC §6.3.
+	if cfg.Tracker.Kind == "markdown" {
+		if cfg.Tracker.Markdown.Root == "" {
+			return fmt.Errorf("tracker.markdown.root is required when tracker.kind=markdown")
+		}
+		info, err := os.Stat(cfg.Tracker.Markdown.Root)
+		if err != nil {
+			return fmt.Errorf("tracker.markdown.root %q is not accessible: %w", cfg.Tracker.Markdown.Root, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("tracker.markdown.root %q is not a directory", cfg.Tracker.Markdown.Root)
+		}
+	}
+
 	return nil
 }
 
