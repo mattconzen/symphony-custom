@@ -7,6 +7,7 @@ import (
 
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/tracker/jira"
 	"github.com/openai/symphony/go/internal/tracker/linear"
 	"github.com/openai/symphony/go/internal/tracker/markdown"
 	"github.com/openai/symphony/go/internal/tracker/memory"
@@ -23,7 +24,7 @@ type Tracker interface {
 }
 
 // New returns a Tracker for the configured tracker kind. Supports "memory",
-// "linear", "markdown", and "openspec".
+// "linear", "markdown", "openspec", and "jira".
 func New(cfg config.Config) (Tracker, error) {
 	switch cfg.Tracker.Kind {
 	case "memory":
@@ -34,6 +35,8 @@ func New(cfg config.Config) (Tracker, error) {
 		return markdown.New(cfg)
 	case "openspec":
 		return openspec.New(cfg)
+	case "jira":
+		return jira.New(cfg, nil)
 	default:
 		return nil, fmt.Errorf("unsupported tracker.kind: %s (will be added in a later phase)", cfg.Tracker.Kind)
 	}

@@ -378,6 +378,22 @@ func Preflight(cfg Config) error {
 		}
 	}
 
+	if cfg.Tracker.Kind == "jira" {
+		j := cfg.Tracker.JIRA
+		if j.Endpoint == "" {
+			return fmt.Errorf("tracker.jira.endpoint is required when tracker.kind=jira")
+		}
+		if j.Email == "" {
+			return fmt.Errorf("tracker.jira.email is required when tracker.kind=jira")
+		}
+		if j.APIToken == "" {
+			return fmt.Errorf("tracker.jira.api_token is required when tracker.kind=jira")
+		}
+		if j.ProjectKey == "" {
+			return fmt.Errorf("tracker.jira.project_key is required when tracker.kind=jira")
+		}
+	}
+
 	return nil
 }
 
