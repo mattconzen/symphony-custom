@@ -18,9 +18,29 @@ var RegisterMockFactory func(fn func() Runtime)
 // mockFactory holds the mock runtime constructor registered by the mock package.
 var mockFactory func() Runtime
 
+// RegisterCodexFactory registers the Codex runtime factory. This is called by
+// the agent/codex package's init() to avoid import cycles.
+var RegisterCodexFactory func(fn func(config.Config) (Runtime, error))
+
+// codexFactory holds the Codex runtime constructor registered by the codex package.
+var codexFactory func(config.Config) (Runtime, error)
+
+// RegisterClaudeFactory registers the Claude runtime factory. This is called by
+// the agent/claude package's init() to avoid import cycles.
+var RegisterClaudeFactory func(fn func(config.Config) (Runtime, error))
+
+// claudeFactory holds the Claude runtime constructor registered by the claude package.
+var claudeFactory func(config.Config) (Runtime, error)
+
 func init() {
 	RegisterMockFactory = func(fn func() Runtime) {
 		mockFactory = fn
+	}
+	RegisterCodexFactory = func(fn func(config.Config) (Runtime, error)) {
+		codexFactory = fn
+	}
+	RegisterClaudeFactory = func(fn func(config.Config) (Runtime, error)) {
+		claudeFactory = fn
 	}
 }
 
@@ -100,9 +120,15 @@ func New(cfg config.Config) (Runtime, error) {
 		}
 		return mockFactory(), nil
 	case "codex":
-		return nil, fmt.Errorf("unsupported agent.runtime: codex (will be added in a later phase)")
+		if codexFactory == nil {
+			return nil, fmt.Errorf("codex runtime not registered (import _ \"github.com/openai/symphony/go/internal/agent/codex\")")
+		}
+		return codexFactory(cfg)
 	case "claude":
-		return nil, fmt.Errorf("unsupported agent.runtime: claude (will be added in a later phase)")
+		if claudeFactory == nil {
+			return nil, fmt.Errorf("claude runtime not registered (import _ \"github.com/openai/symphony/go/internal/agent/claude\")")
+		}
+		return claudeFactory(cfg)
 	default:
 		return nil, fmt.Errorf("unsupported agent.runtime: %s", cfg.Agent.Runtime)
 	}

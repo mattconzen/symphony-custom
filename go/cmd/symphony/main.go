@@ -12,7 +12,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	_ "github.com/openai/symphony/go/internal/agent/mock" // register mock runtime
+	_ "github.com/openai/symphony/go/internal/agent/claude" // register claude runtime
+	_ "github.com/openai/symphony/go/internal/agent/codex"  // register codex runtime
+	_ "github.com/openai/symphony/go/internal/agent/mock"   // register mock runtime
 
 	"github.com/openai/symphony/go/internal/agent"
 	"github.com/openai/symphony/go/internal/config"
