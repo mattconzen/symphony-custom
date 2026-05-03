@@ -10,6 +10,7 @@ import (
 	"github.com/openai/symphony/go/internal/tracker/linear"
 	"github.com/openai/symphony/go/internal/tracker/markdown"
 	"github.com/openai/symphony/go/internal/tracker/memory"
+	"github.com/openai/symphony/go/internal/tracker/openspec"
 )
 
 // Tracker is the interface that all tracker adapters must implement per SPEC §11.1.
@@ -22,7 +23,7 @@ type Tracker interface {
 }
 
 // New returns a Tracker for the configured tracker kind. Supports "memory",
-// "linear", and "markdown". Additional kinds will be registered in later phases.
+// "linear", "markdown", and "openspec".
 func New(cfg config.Config) (Tracker, error) {
 	switch cfg.Tracker.Kind {
 	case "memory":
@@ -31,6 +32,8 @@ func New(cfg config.Config) (Tracker, error) {
 		return linear.New(cfg, nil)
 	case "markdown":
 		return markdown.New(cfg)
+	case "openspec":
+		return openspec.New(cfg)
 	default:
 		return nil, fmt.Errorf("unsupported tracker.kind: %s (will be added in a later phase)", cfg.Tracker.Kind)
 	}

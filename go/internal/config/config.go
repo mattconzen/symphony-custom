@@ -170,6 +170,9 @@ func Resolve(wf domain.Workflow, workflowDir string) (Config, error) {
 	if cfg.Tracker.Endpoint == "" && cfg.Tracker.Kind == "linear" {
 		cfg.Tracker.Endpoint = "https://api.linear.app/graphql"
 	}
+	if cfg.Tracker.OpenSpec.Root == "" {
+		cfg.Tracker.OpenSpec.Root = resolvePathField("openspec", workflowDir)
+	}
 
 	// ---- Polling ----
 	if p, ok := wf.Config["polling"]; ok {
@@ -359,6 +362,19 @@ func Preflight(cfg Config) error {
 		}
 		if !info.IsDir() {
 			return fmt.Errorf("tracker.markdown.root %q is not a directory", cfg.Tracker.Markdown.Root)
+		}
+	}
+
+	if cfg.Tracker.Kind == "openspec" {
+		if cfg.Tracker.OpenSpec.Root == "" {
+			return fmt.Errorf("tracker.openspec.root is required when tracker.kind=openspec")
+		}
+		info, err := os.Stat(cfg.Tracker.OpenSpec.Root)
+		if err != nil {
+			return fmt.Errorf("tracker.openspec.root %q is not accessible: %w", cfg.Tracker.OpenSpec.Root, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("tracker.openspec.root %q is not a directory", cfg.Tracker.OpenSpec.Root)
 		}
 	}
 
