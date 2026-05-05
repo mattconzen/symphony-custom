@@ -35,11 +35,15 @@ type Orchestrator struct {
 	// Set via WithPromptTemplate to decouple workflow loading from cfg.
 	promptTemplate string
 
+	// rootCtx is the context passed to Run(); used by scheduleRetry so that
+	// the retry timer fires against the orchestrator lifetime, not the
+	// (already-cancelled) per-issue dispatch context.
+	rootCtx context.Context //nolint:containedctx
+
 	mu            sync.Mutex
 	running       map[string]*runEntry
 	claimed       map[string]struct{}
 	retryAttempts map[string]*domain.RetryEntry
-	completed     map[string]struct{}
 }
 
 // New returns an Orchestrator wired with the provided dependencies.
@@ -59,7 +63,6 @@ func New(
 		running:       make(map[string]*runEntry),
 		claimed:       make(map[string]struct{}),
 		retryAttempts: make(map[string]*domain.RetryEntry),
-		completed:     make(map[string]struct{}),
 	}
 }
 
@@ -72,6 +75,10 @@ func (o *Orchestrator) WithPromptTemplate(tmpl string) *Orchestrator {
 
 // Run starts the main poll loop. It returns when ctx is cancelled.
 func (o *Orchestrator) Run(ctx context.Context) error {
+	// Store the orchestrator-level context so scheduleRetry can use it even
+	// after a per-issue dispatch context has been cancelled.
+	o.rootCtx = ctx
+
 	interval := time.Duration(o.cfg.Polling.IntervalMs) * time.Millisecond
 	if interval <= 0 {
 		interval = 30 * time.Second

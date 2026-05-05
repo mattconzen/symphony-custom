@@ -27,7 +27,7 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
 	ws, err := o.ws.EnsureForIssue(ctx, issue)
 	if err != nil {
 		log.Error("workspace ensure failed", "err", fmt.Sprintf("%v", err))
-		o.scheduleRetry(ctx, issue, err)
+		o.scheduleRetry(issue, err)
 		return
 	}
 
@@ -47,7 +47,7 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
 	sess, err := o.runtime.StartSession(ctx, ws)
 	if err != nil {
 		log.Error("start session failed", "err", fmt.Sprintf("%v", err))
-		o.scheduleRetry(ctx, issue, err)
+		o.scheduleRetry(issue, err)
 		return
 	}
 
@@ -72,7 +72,7 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
 	}
 
 	if runErr != nil && ctx.Err() == nil {
-		o.scheduleRetry(ctx, issue, runErr)
+		o.scheduleRetry(issue, runErr)
 	}
 }
 

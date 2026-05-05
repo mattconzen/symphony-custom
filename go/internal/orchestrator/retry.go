@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -50,7 +49,12 @@ func computeBackoffMs(attempt int, cfg config.Config) int64 {
 //
 // The function records a RetryEntry on the orchestrator and fires an
 // AfterFunc timer to trigger re-dispatch.
-func (o *Orchestrator) scheduleRetry(ctx context.Context, issue domain.Issue, runErr error) {
+//
+// IMPORTANT: This method uses o.rootCtx (the orchestrator-level context set in
+// Run) rather than the per-issue dispatch context. The per-issue context is
+// already cancelled by the time the retry timer fires, so using it would
+// silently drop all retries.
+func (o *Orchestrator) scheduleRetry(issue domain.Issue, runErr error) {
 	o.mu.Lock()
 	entry, exists := o.retryAttempts[issue.ID]
 	if !exists {
@@ -83,6 +87,8 @@ func (o *Orchestrator) scheduleRetry(ctx context.Context, issue domain.Issue, ru
 
 	delayMs := computeBackoffMs(attempt, o.cfg)
 	entry.DueAtMs = time.Now().UnixMilli() + delayMs
+	// Capture rootCtx under the lock to avoid a race with Run() setting it.
+	rootCtx := o.rootCtx
 	o.mu.Unlock()
 
 	o.log.Info("scheduling retry",
@@ -93,14 +99,15 @@ func (o *Orchestrator) scheduleRetry(ctx context.Context, issue domain.Issue, ru
 	)
 
 	time.AfterFunc(time.Duration(delayMs)*time.Millisecond, func() {
-		// Check context before re-queueing.
-		if ctx.Err() != nil {
+		// Use the orchestrator-level context (not the per-issue dispatch context,
+		// which is already cancelled by the time this timer fires).
+		if rootCtx == nil || rootCtx.Err() != nil {
 			return
 		}
 		// Re-activate the issue in the tracker so the next poll picks it up.
 		if len(o.cfg.Tracker.ActiveStates) > 0 {
 			state := o.cfg.Tracker.ActiveStates[0]
-			if err := o.tracker.UpdateIssueState(ctx, issue.ID, state); err != nil {
+			if err := o.tracker.UpdateIssueState(rootCtx, issue.ID, state); err != nil {
 				o.log.Warn("retry: failed to reactivate issue",
 					"issue_id", issue.ID,
 					"err", fmt.Sprintf("%v", err),
