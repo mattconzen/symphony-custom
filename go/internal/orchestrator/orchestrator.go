@@ -73,11 +73,64 @@ func (o *Orchestrator) WithPromptTemplate(tmpl string) *Orchestrator {
 	return o
 }
 
+// startupCleanup queries the tracker for terminal-state issues and removes
+// their workspace directories per SPEC §8.6. Cleanup is best-effort: tracker
+// fetch errors and per-issue remove errors are logged at warn level and
+// execution continues. The method honours ctx cancellation mid-loop.
+func (o *Orchestrator) startupCleanup(ctx context.Context) {
+	terminalStates := o.cfg.Tracker.TerminalStates
+	if len(terminalStates) == 0 {
+		return
+	}
+
+	issues, err := o.tracker.FetchIssuesByStates(ctx, terminalStates)
+	if err != nil {
+		o.log.Warn("startup_cleanup: fetch terminal issues failed, skipping cleanup",
+			"err", fmt.Sprintf("%v", err),
+		)
+		return
+	}
+
+	var removed, failed int
+loop:
+	for _, issue := range issues {
+		// Honour context cancellation between removals.
+		select {
+		case <-ctx.Done():
+			o.log.Warn("startup_cleanup: context cancelled mid-cleanup",
+				"remaining", len(issues)-removed-failed,
+			)
+			break loop
+		default:
+		}
+
+		if err := o.ws.RemoveForIssue(ctx, issue); err != nil {
+			o.log.Warn("startup_cleanup: failed to remove workspace",
+				"issue_id", issue.ID,
+				"issue_identifier", issue.Identifier,
+				"err", fmt.Sprintf("%v", err),
+			)
+			failed++
+		} else {
+			removed++
+		}
+	}
+
+	o.log.Info("startup_cleanup_complete",
+		"requested", len(issues),
+		"removed", removed,
+		"failed", failed,
+	)
+}
+
 // Run starts the main poll loop. It returns when ctx is cancelled.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	// Store the orchestrator-level context so scheduleRetry can use it even
 	// after a per-issue dispatch context has been cancelled.
 	o.rootCtx = ctx
+
+	// Perform one-shot startup cleanup before the first poll tick per SPEC §8.6.
+	o.startupCleanup(ctx)
 
 	interval := time.Duration(o.cfg.Polling.IntervalMs) * time.Millisecond
 	if interval <= 0 {
