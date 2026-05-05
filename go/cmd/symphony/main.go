@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	_ "github.com/openai/symphony/go/internal/agent/claude" // register claude runtime
@@ -107,10 +108,5 @@ func main() {
 
 // dirOf returns the directory of the given file path.
 func dirOf(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' || path[i] == '\\' {
-			return path[:i]
-		}
-	}
-	return "."
+	return filepath.Dir(path)
 }
