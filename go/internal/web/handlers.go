@@ -76,16 +76,48 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) routes() {
-	h.mux.HandleFunc("GET /", h.handleDashboard)
+	h.mux.HandleFunc("/", h.handleDashboard)
 	h.mux.HandleFunc("GET /static/{file}", h.handleStatic)
+
+	// API routes mirror the Elixir router's explicit `match(:*, ...)` style:
+	// dispatch on method inside one handler per path so 405 responses carry
+	// the JSON error envelope rather than the mux's default empty body.
+	h.mux.HandleFunc("/api/v1/state", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodGet: h.handleAPIState,
+	}))
+	h.mux.HandleFunc("/api/v1/refresh", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodPost: h.handleAPIRefresh,
+	}))
+	h.mux.HandleFunc("/api/v1/{issue_identifier}", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodGet: h.handleAPIIssue,
+	}))
+}
+
+// dispatchByMethod routes by HTTP method, returning the JSON method-not-
+// allowed envelope for any unlisted method. Mirrors Elixir's
+// match(:*, ...) routes per path.
+func (h *Handler) dispatchByMethod(handlers map[string]http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if fn, ok := handlers[r.Method]; ok {
+			fn(w, r)
+			return
+		}
+		h.handleAPIMethodNotAllowed(w, r)
+	}
 }
 
 // handleDashboard renders the dashboard HTML page against the current
-// orchestrator snapshot. Returns 404 for any GET path other than "/" so the
-// catch-all "GET /" pattern doesn't swallow unrelated requests.
+// orchestrator snapshot. The mux pattern is the unmethoded "/", which is
+// the catch-all subtree, so this handler also has to filter unmatched
+// paths and methods itself.
 func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
