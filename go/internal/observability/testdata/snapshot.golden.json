@@ -1,0 +1,69 @@
+{
+  "generated_at": "2026-05-09T12:00:00Z",
+  "counts": {
+    "running": 2,
+    "retrying": 1
+  },
+  "codex_totals": {
+    "total_tokens": 1500,
+    "input_tokens": 900,
+    "output_tokens": 600,
+    "seconds_running": 42
+  },
+  "rate_limits": {
+    "primary": {
+      "resets_at": "2026-05-09T13:00:00Z",
+      "used_percent": 12.5
+    },
+    "secondary": null
+  },
+  "running": [
+    {
+      "issue_id": "issue-1",
+      "issue_identifier": "TEST-1",
+      "state": "In Progress",
+      "worker_host": "worker-a",
+      "workspace_path": "/tmp/work/TEST-1",
+      "session_id": "sess-1",
+      "turn_count": 2,
+      "last_event": "assistant_message",
+      "last_message": "Refactoring the parser.",
+      "started_at": "2026-05-09T11:55:00Z",
+      "last_event_at": "2026-05-09T11:59:30Z",
+      "tokens": {
+        "total_tokens": 800,
+        "input_tokens": 500,
+        "output_tokens": 300
+      }
+    },
+    {
+      "issue_id": "issue-2",
+      "issue_identifier": "TEST-2",
+      "state": "In Progress",
+      "worker_host": null,
+      "workspace_path": "/tmp/work/TEST-2",
+      "session_id": "sess-2",
+      "turn_count": 1,
+      "last_event": "tool_call",
+      "last_message": null,
+      "started_at": "2026-05-09T11:58:00Z",
+      "last_event_at": "2026-05-09T11:59:45Z",
+      "tokens": {
+        "total_tokens": 700,
+        "input_tokens": 400,
+        "output_tokens": 300
+      }
+    }
+  ],
+  "retrying": [
+    {
+      "issue_id": "issue-3",
+      "issue_identifier": "TEST-3",
+      "attempt": 2,
+      "due_at": "2026-05-09T12:05:00Z",
+      "error": "transient agent failure",
+      "worker_host": null,
+      "workspace_path": null
+    }
+  ]
+}
