@@ -702,7 +702,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `hooks.timeout_ms`: integer, default `60000`; MUST be > 0 when `hooks.between_turns` is non-empty
 - `agent.runtime`: string, REQUIRED, allowed values: `codex` (default), `claude`
 - `agent.max_concurrent_agents`: integer, default `10`
-- `agent.max_turns`: integer, default `20`
+- `agent.max_turns`: integer, default `20`. MUST equal `1` when `agent.runtime=claude` (see §10.8.7).
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `codex.command`: shell command string, default `codex app-server` (only when `agent.runtime=codex`)
@@ -1321,6 +1321,12 @@ stream-json event types to Symphony's internal event surface (see §10.4) as fol
 - `claude.stall_timeout_ms`: enforced by the orchestrator based on event inactivity; same
   semantics as `codex.stall_timeout_ms`.
 - When a timeout fires, the subprocess MUST be killed and the turn reported as failed.
+
+#### 10.8.7 Single-Turn Constraint
+
+The `claude` runtime is single-turn-only because the `claude --print` CLI exits after emitting its
+`result` event. Implementations MUST reject `agent.max_turns > 1` at preflight (§6.3) when
+`agent.runtime == "claude"`. Multi-turn workflows require a different runtime (e.g. `codex`).
 
 ## 11. Issue Tracker Integration Contract (Multi-Kind)
 

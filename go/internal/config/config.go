@@ -22,6 +22,7 @@ var (
 	ErrInvalidAgentRuntime         = errors.New("agent.runtime must be one of: codex, claude, mock")
 	ErrBetweenTurnsRequiresTimeout = errors.New("hooks.timeout_ms must be > 0 when hooks.between_turns is set")
 	ErrUnsupportedTrackerKind      = errors.New("unsupported tracker.kind")
+	ErrClaudeSingleTurnOnly        = errors.New("agent.runtime=claude requires agent.max_turns=1 (single-turn only; claude --print exits after one response)")
 )
 
 // TrackerMarkdown holds config for tracker.kind == "markdown".
@@ -344,6 +345,12 @@ func Preflight(cfg Config) error {
 	// Validate codex command when runtime is codex
 	if cfg.Agent.Runtime == "codex" && cfg.Codex.Command == "" {
 		return fmt.Errorf("codex.command is required when agent.runtime=codex")
+	}
+
+	// Claude runtime is single-turn only per SPEC §10.8.7: claude --print exits
+	// after emitting its result event, so multi-turn requires a different runtime.
+	if cfg.Agent.Runtime == "claude" && cfg.Agent.MaxTurns > 1 {
+		return fmt.Errorf("%w: got max_turns=%d", ErrClaudeSingleTurnOnly, cfg.Agent.MaxTurns)
 	}
 
 	// between_turns requires positive timeout_ms
