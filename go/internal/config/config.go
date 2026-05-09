@@ -317,7 +317,7 @@ func Resolve(wf domain.Workflow, workflowDir string) (Config, error) {
 		cfg.Claude.TurnTimeoutMs = 3600000
 	}
 	if cfg.Claude.ReadTimeoutMs == 0 {
-		cfg.Claude.ReadTimeoutMs = 5000
+		cfg.Claude.ReadTimeoutMs = 60000
 	}
 	if cfg.Claude.StallTimeoutMs == 0 {
 		cfg.Claude.StallTimeoutMs = 300000

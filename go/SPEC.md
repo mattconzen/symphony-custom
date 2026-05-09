@@ -716,7 +716,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `claude.model`: string, OPTIONAL, passed to `--model` (only when `agent.runtime=claude`)
 - `claude.permission_mode`: string, OPTIONAL, passed to `--permission-mode` (only when `agent.runtime=claude`)
 - `claude.turn_timeout_ms`: integer, default `3600000` (only when `agent.runtime=claude`)
-- `claude.read_timeout_ms`: integer, default `5000` (only when `agent.runtime=claude`)
+- `claude.read_timeout_ms`: integer, default `60000` (longer than `codex.read_timeout_ms` because the `claude` CLI emits no stream-json events while executing tool calls, which can exceed 5s) (only when `agent.runtime=claude`)
 - `claude.stall_timeout_ms`: integer, default `300000` (only when `agent.runtime=claude`)
 
 ## 7. Orchestration State Machine
