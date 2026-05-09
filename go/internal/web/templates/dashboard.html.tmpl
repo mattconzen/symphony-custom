@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Symphony Observability</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+    <script src="/static/htmx.min.js"></script>
+    <script src="/static/htmx-ws.min.js"></script>
+  </head>
+  <body hx-ext="ws" ws-connect="/ws">
+    <main class="app-shell">
+      <section class="dashboard-shell">
+        <header class="hero-card">
+          <div class="hero-grid">
+            <div>
+              <p class="eyebrow">Symphony Observability</p>
+              <h1 class="hero-title">Operations Dashboard</h1>
+              <p class="hero-copy">
+                Current state, retry pressure, token usage, and orchestration health for the active Symphony runtime.
+              </p>
+            </div>
+
+            <div id="header-status" class="status-stack">
+              {{ template "header-status" . }}
+            </div>
+          </div>
+        </header>
+
+        {{ if .Error }}
+          <section class="error-card">
+            <h2 class="error-title">Snapshot unavailable</h2>
+            <p class="error-copy">
+              <strong>{{ .Error.Code }}:</strong> {{ .Error.Message }}
+            </p>
+          </section>
+        {{ else }}
+          <section id="metric-grid" class="metric-grid">
+            {{ template "metric-grid" . }}
+          </section>
+
+          <section id="rate-limits" class="section-card">
+            {{ template "rate-limits" . }}
+          </section>
+
+          <section id="running-sessions" class="section-card">
+            {{ template "running-sessions" . }}
+          </section>
+
+          <section id="retrying-sessions" class="section-card">
+            {{ template "retrying-sessions" . }}
+          </section>
+        {{ end }}
+      </section>
+    </main>
+  </body>
+</html>
+
+{{ define "header-status" }}
+  <span class="status-badge status-badge-live">
+    <span class="status-badge-dot"></span>
+    Live
+  </span>
+  <span class="status-badge status-badge-offline">
+    <span class="status-badge-dot"></span>
+    Offline
+  </span>
+{{ end }}
+
+{{ define "metric-grid" }}
+  <article class="metric-card">
+    <p class="metric-label">Running</p>
+    <p class="metric-value numeric">{{ .Counts.Running }}</p>
+    <p class="metric-detail">Active issue sessions in the current runtime.</p>
+  </article>
+
+  <article class="metric-card">
+    <p class="metric-label">Retrying</p>
+    <p class="metric-value numeric">{{ .Counts.Retrying }}</p>
+    <p class="metric-detail">Issues waiting for the next retry window.</p>
+  </article>
+
+  <article class="metric-card">
+    <p class="metric-label">Total tokens</p>
+    <p class="metric-value numeric">{{ formatInt .CodexTotals.TotalTokens }}</p>
+    <p class="metric-detail numeric">
+      In {{ formatInt .CodexTotals.InputTokens }} / Out {{ formatInt .CodexTotals.OutputTokens }}
+    </p>
+  </article>
+
+  <article class="metric-card">
+    <p class="metric-label">Runtime</p>
+    <p class="metric-value numeric">{{ formatRuntime (totalRuntimeSeconds .) }}</p>
+    <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
+  </article>
+{{ end }}
+
+{{ define "rate-limits" }}
+  <div class="section-header">
+    <div>
+      <h2 class="section-title">Rate limits</h2>
+      <p class="section-copy">Latest upstream rate-limit snapshot, when available.</p>
+    </div>
+  </div>
+
+  <pre class="code-panel">{{ prettyValue .RateLimits }}</pre>
+{{ end }}
+
+{{ define "running-sessions" }}
+  <div class="section-header">
+    <div>
+      <h2 class="section-title">Running sessions</h2>
+      <p class="section-copy">Active issues, last known agent activity, and token usage.</p>
+    </div>
+  </div>
+
+  {{ if not .Running }}
+    <p class="empty-state">No active sessions.</p>
+  {{ else }}
+    <div class="table-wrap">
+      <table class="data-table data-table-running">
+        <colgroup>
+          <col style="width: 12rem;" />
+          <col style="width: 8rem;" />
+          <col style="width: 7.5rem;" />
+          <col style="width: 8.5rem;" />
+          <col />
+          <col style="width: 10rem;" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Issue</th>
+            <th>State</th>
+            <th>Session</th>
+            <th>Runtime / turns</th>
+            <th>Codex update</th>
+            <th>Tokens</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ range .Running }}
+            <tr>
+              <td>
+                <div class="issue-stack">
+                  <span class="issue-id">{{ .IssueIdentifier }}</span>
+                  <a class="issue-link" href="/api/v1/{{ .IssueIdentifier }}">JSON details</a>
+                </div>
+              </td>
+              <td>
+                <span class="{{ stateBadgeClass .State }}">{{ .State }}</span>
+              </td>
+              <td>
+                <div class="session-stack">
+                  {{ if .SessionID }}
+                    <span class="mono">{{ .SessionID }}</span>
+                  {{ else }}
+                    <span class="muted">n/a</span>
+                  {{ end }}
+                </div>
+              </td>
+              <td class="numeric">{{ runtimeAndTurns .StartedAt .TurnCount }}</td>
+              <td>
+                <div class="detail-stack">
+                  <span class="event-text" title="{{ or .LastMessage .LastEvent }}">{{ or .LastMessage .LastEvent "n/a" }}</span>
+                  <span class="muted event-meta">
+                    {{ or .LastEvent "n/a" }}
+                    {{ if .LastEventAt }}
+                      &middot; <span class="mono numeric">{{ .LastEventAt }}</span>
+                    {{ end }}
+                  </span>
+                </div>
+              </td>
+              <td>
+                <div class="token-stack numeric">
+                  <span>Total: {{ formatInt .Tokens.TotalTokens }}</span>
+                  <span class="muted">In {{ formatInt .Tokens.InputTokens }} / Out {{ formatInt .Tokens.OutputTokens }}</span>
+                </div>
+              </td>
+            </tr>
+          {{ end }}
+        </tbody>
+      </table>
+    </div>
+  {{ end }}
+{{ end }}
+
+{{ define "retrying-sessions" }}
+  <div class="section-header">
+    <div>
+      <h2 class="section-title">Retry queue</h2>
+      <p class="section-copy">Issues waiting for the next retry window.</p>
+    </div>
+  </div>
+
+  {{ if not .Retrying }}
+    <p class="empty-state">No issues are currently backing off.</p>
+  {{ else }}
+    <div class="table-wrap">
+      <table class="data-table" style="min-width: 680px;">
+        <thead>
+          <tr>
+            <th>Issue</th>
+            <th>Attempt</th>
+            <th>Due at</th>
+            <th>Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ range .Retrying }}
+            <tr>
+              <td>
+                <div class="issue-stack">
+                  <span class="issue-id">{{ .IssueIdentifier }}</span>
+                  <a class="issue-link" href="/api/v1/{{ .IssueIdentifier }}">JSON details</a>
+                </div>
+              </td>
+              <td>{{ .Attempt }}</td>
+              <td class="mono">{{ or .DueAt "n/a" }}</td>
+              <td>{{ or .Error "n/a" }}</td>
+            </tr>
+          {{ end }}
+        </tbody>
+      </table>
+    </div>
+  {{ end }}
+{{ end }}
