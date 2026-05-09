@@ -191,6 +191,31 @@ func TestUpdateIssueState_TerminalAndBack(t *testing.T) {
 	assert.Equal(t, "Todo", issues[0].State)
 }
 
+// TestFetchIssueStatesByIDs_SentinelAutoArchives verifies SPEC §11.7: when
+// changes/<slug>/.symphony-done is present, FetchIssueStatesByIDs MUST remove
+// the sentinel, move the slug to archive/, and return state="Done" in the same
+// call. This is the in-band completion signal a coding agent uses to tell the
+// tracker "I'm done; archive me."
+func TestFetchIssueStatesByIDs_SentinelAutoArchives(t *testing.T) {
+	root := t.TempDir()
+	setupFixtures(t, root)
+
+	sentinel := filepath.Join(root, "changes", "add-foo", ".symphony-done")
+	require.NoError(t, os.WriteFile(sentinel, nil, 0o644))
+
+	a, err := openspec.New(makeCfg(root))
+	require.NoError(t, err)
+
+	issues, err := a.FetchIssueStatesByIDs(context.Background(), []string{"add-foo"})
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "Done", issues[0].State)
+
+	assert.NoDirExists(t, filepath.Join(root, "changes", "add-foo"))
+	assert.DirExists(t, filepath.Join(root, "archive", "add-foo"))
+	assert.NoFileExists(t, filepath.Join(root, "archive", "add-foo", ".symphony-done"))
+}
+
 // TestUpdateIssueState_NoOp verifies that moving an issue to its current
 // state is a no-op (no error, no directory change).
 func TestUpdateIssueState_NoOp(t *testing.T) {
