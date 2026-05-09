@@ -51,7 +51,7 @@ func TestResolve_Defaults(t *testing.T) {
 	// Claude defaults
 	assert.Contains(t, cfg.Claude.Command, "claude --print")
 	assert.Equal(t, 3600000, cfg.Claude.TurnTimeoutMs)
-	assert.Equal(t, 5000, cfg.Claude.ReadTimeoutMs)
+	assert.Equal(t, 60000, cfg.Claude.ReadTimeoutMs)
 	assert.Equal(t, 300000, cfg.Claude.StallTimeoutMs)
 }
 
