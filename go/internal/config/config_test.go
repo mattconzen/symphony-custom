@@ -197,6 +197,43 @@ func TestPreflight_BetweenTurnsRequiresTimeout(t *testing.T) {
 	assert.True(t, errors.Is(err, config.ErrBetweenTurnsRequiresTimeout))
 }
 
+func TestPreflight_ClaudeRequiresSingleTurn(t *testing.T) {
+	wf := domain.Workflow{
+		Config: map[string]any{
+			"tracker": map[string]any{"kind": "memory"},
+			"agent": map[string]any{
+				"runtime":   "claude",
+				"max_turns": 2,
+			},
+		},
+	}
+	tmpDir := t.TempDir()
+	cfg, err := config.Resolve(wf, tmpDir)
+	require.NoError(t, err)
+
+	err = config.Preflight(cfg)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, config.ErrClaudeSingleTurnOnly))
+}
+
+func TestPreflight_ClaudeMaxTurnsOneOK(t *testing.T) {
+	wf := domain.Workflow{
+		Config: map[string]any{
+			"tracker": map[string]any{"kind": "memory"},
+			"agent": map[string]any{
+				"runtime":   "claude",
+				"max_turns": 1,
+			},
+		},
+	}
+	tmpDir := t.TempDir()
+	cfg, err := config.Resolve(wf, tmpDir)
+	require.NoError(t, err)
+
+	err = config.Preflight(cfg)
+	require.NoError(t, err)
+}
+
 func TestWatcher_HappyPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	wfPath := filepath.Join(tmpDir, "WORKFLOW.md")
