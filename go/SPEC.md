@@ -719,6 +719,12 @@ not require recognizing or validating extension fields unless that extension is 
 - `claude.read_timeout_ms`: integer, default `60000` (longer than `codex.read_timeout_ms` because the `claude` CLI emits no stream-json events while executing tool calls, which can exceed 5s) (only when `agent.runtime=claude`)
 - `claude.stall_timeout_ms`: integer, default `300000` (only when `agent.runtime=claude`)
 
+CLI-only flags (not config keys; see §14 for the dashboard semantics):
+
+- `-workflow`: path to `WORKFLOW.md`, default `WORKFLOW.md` (resolved against the process working directory).
+- `-port`: integer, default `0` (web dashboard disabled). When `>0`, enables the OPTIONAL observability dashboard described in §14.
+- `-listen`: string, default `127.0.0.1`. Bind interface for the dashboard when `-port>0`.
+
 ## 7. Orchestration State Machine
 
 The orchestrator is the only component that mutates scheduling state. All worker outcomes are
@@ -1902,9 +1908,134 @@ API design notes:
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state
   logic.
 
-## 14. Failure Model and Recovery Strategy
+## 14. Observability Web Dashboard
 
-### 14.1 Failure Classes
+This section describes the concrete, opt-in HTTP dashboard that the Go reference implementation
+ships in `cmd/symphony` and `internal/web/`. It is a specialization of the OPTIONAL extension
+described in §13.7 — that section sketches the contract any conforming implementation MAY adopt;
+this section pins down the wire shapes that the Go binary MUST emit so external consumers
+(scrapers, Elixir-Symphony parity tooling, browser clients) can rely on a stable surface.
+
+### 14.1 Lifecycle
+
+- The dashboard is opt-in. The `-port` CLI flag controls enablement: `-port=0` (default) keeps
+  the existing orchestrator-only run path; `-port>0` starts an `http.Server` alongside the
+  orchestrator.
+- The `-listen` CLI flag selects the bind interface; default `127.0.0.1`. The default MUST stay
+  loopback. Operators that expose the dashboard more widely are responsible for putting it
+  behind a reverse proxy (auth, TLS, rate limiting). The Go binary ships no auth layer.
+- A single SIGINT/SIGTERM handler MUST drain both subsystems: orchestrator first (stops new
+  dispatches, lets in-flight turns observe their per-issue context cancel), then HTTP server
+  via `Shutdown` with a bounded timeout (5 seconds in the reference implementation). `main`
+  MUST NOT return until both have finished draining or the shutdown timeout elapses.
+- The bound URL MUST be logged at startup: `web dashboard available at http://<listen>:<port>/`.
+
+### 14.2 Routes
+
+The Go runtime MUST mount the following routes when `-port>0`:
+
+| Method | Path                          | Status | Body shape                                                       |
+| ------ | ----------------------------- | ------ | ---------------------------------------------------------------- |
+| GET    | `/`                           | 200    | Server-rendered HTML (`text/html; charset=utf-8`).               |
+| GET    | `/ws`                         | 101    | WebSocket upgrade (see §14.4).                                   |
+| GET    | `/static/{file}`              | 200    | Embedded asset; `Cache-Control: public, max-age=3600`.           |
+| GET    | `/api/v1/state`               | 200    | Orchestrator snapshot JSON (see §14.3).                          |
+| GET    | `/api/v1/{issue_identifier}`  | 200/404| Per-issue payload or `issue_not_found` error.                    |
+| POST   | `/api/v1/refresh`             | 202    | `{"queued":true,"coalesced":false,"requested_at":"…","operations":["poll","reconcile"]}`. |
+
+Normative requirements:
+
+- `Content-Type` for any `/api/v1/*` response MUST be `application/json; charset=utf-8`.
+- JSON field names for `/api/v1/state` MUST match `internal/observability/snapshot.go` exactly:
+  `counts`, `codex_totals`, `running`, `retrying`, `rate_limits`, `generated_at`. These mirror
+  Elixir's `SymphonyElixirWeb.Presenter.state_payload/2` so consumers can switch runtimes
+  without changing scrapers.
+- Unsupported methods on any `/api/v1/*` route MUST return `405` with the error envelope from
+  §14.5 and a `code` of `method_not_allowed`. The mux's default 405 (empty body) is NOT
+  conformant.
+- `/static/{file}` MUST reject path traversal attempts (`..`, embedded slashes) with `404`. The
+  set of reachable files is restricted to the contents of the embedded `static/` directory.
+
+#### v0 deviations from the Elixir reference
+
+- `POST /api/v1/refresh` returns `202` unconditionally and does NOT trigger an out-of-band
+  reconcile in the Go orchestrator — the orchestrator polls on its own tick interval and there
+  is currently no plumbed refresh trigger. The 202 envelope therefore acts as an
+  accept-and-no-op acknowledgement. This MAY change in a later phase if an out-of-band refresh
+  trigger is added; consumers MUST accept that the response shape stays the same regardless.
+- `GET /api/v1/{issue_identifier}` returns `workspace.path: null` whenever neither the running
+  nor retrying entry for the issue carries a workspace path. Elixir synthesizes a path from
+  the configured workflow root + identifier; the Go runtime deliberately keeps the web layer
+  decoupled from `internal/config` and surfaces `null` instead. Consumers MUST treat `null`
+  as a valid value for `workspace.path` and `workspace.host`.
+
+### 14.3 Snapshot data contract
+
+`internal/observability/snapshot.go` is the canonical schema for the JSON returned by
+`GET /api/v1/state`. The struct fields and their `json:"…"` tags define the wire shape; this
+spec defers to the source file rather than re-stating every field.
+
+Mandatory top-level keys mirroring Elixir's Presenter:
+
+- `counts` — running/retrying counters.
+- `codex_totals` — aggregate input/output/total tokens and `seconds_running` across all
+  observed sessions, including the elapsed time for the currently active ones.
+- `running[]` — one entry per in-flight dispatch.
+- `retrying[]` — one entry per scheduled retry.
+- `rate_limits` — latest agent-runtime rate-limit payload, or `null` if unset.
+- `generated_at` — RFC3339 timestamp at which the snapshot was assembled.
+
+The Go runtime constructs the snapshot synchronously by reading orchestrator state under its
+single mutex; the `timeout` and `unavailable` snapshot error modes from §13.3 are NOT emitted
+because there is no asynchronous boundary that could surface them.
+
+### 14.4 Real-time update protocol
+
+`GET /ws` upgrades to a WebSocket using the `coder/websocket` library. After upgrade:
+
+- The server MUST send an initial frame containing the current snapshot rendered as HTML
+  fragments, so freshly-connected clients see the present state without waiting for the next
+  orchestrator event.
+- The server MUST push a new frame whenever the orchestrator's update callback fires. The
+  callback fires on the same observable transitions as Elixir's
+  `ObservabilityPubSub.broadcast_update`: dispatch start, session start, turn complete,
+  dispatch finish, reconcile state change, retry scheduled, retry timer fired.
+- Each frame is a single text message containing concatenated HTML fragments. Each fragment
+  is wrapped as an htmx out-of-band swap: `<div hx-swap-oob="innerHTML:#<id>">…</div>`. The
+  fragment ids correspond to the named container ids that the dashboard renders on first load
+  and MUST include: `metric-grid`, `running-sessions`, `retrying-sessions`, `rate-limits`, and
+  `header-status`.
+- Slow clients MUST NOT block the orchestrator. The fan-out broadcaster uses a non-blocking
+  send into a per-subscriber buffered channel; a subscriber whose buffer is full has the event
+  dropped for that round but its subscription survives, so the next event is delivered if the
+  client catches up.
+- The connection terminates when the client disconnects, the request context is cancelled
+  (server shutdown), or a frame write fails. The server MUST NOT keep dead subscribers
+  registered.
+
+### 14.5 Error format
+
+For any `/api/v1/*` 4xx or 5xx response, the body MUST be the JSON envelope:
+
+```json
+{"error": {"code": "<snake_case>", "message": "human-readable detail"}}
+```
+
+The Go runtime emits the following codes:
+
+- `issue_not_found` — `GET /api/v1/{issue_identifier}` for an identifier not present in the
+  running or retrying slice.
+- `method_not_allowed` — any `/api/v1/*` route reached with an unsupported method.
+- `not_found` — fallback for `/api/v1/{issue_identifier}` where the path captured an empty
+  identifier.
+
+The Elixir runtime's `orchestrator_unavailable` code is NOT emitted by the Go runtime because
+the orchestrator and HTTP server share a process; if the orchestrator is unreachable, the HTTP
+server has already terminated.
+
+## 15. Failure Model and Recovery Strategy
+
+### 15.1 Failure Classes
 
 1. `Workflow/Config Failures`
    - Missing `WORKFLOW.md`
@@ -1937,7 +2068,7 @@ API design notes:
    - Dashboard render errors
    - Log sink configuration failure
 
-### 14.2 Recovery Behavior
+### 15.2 Recovery Behavior
 
 - Dispatch validation failures:
   - Skip new dispatches.
@@ -1958,7 +2089,7 @@ API design notes:
 - Dashboard/log failures:
   - Do not crash the orchestrator.
 
-### 14.3 Partial State Recovery (Restart)
+### 15.3 Partial State Recovery (Restart)
 
 Current design is intentionally in-memory for scheduler state.
 Restart recovery means the service can resume useful operation by polling tracker state and reusing
@@ -1974,7 +2105,7 @@ After restart:
   - fresh polling of active issues
   - re-dispatching eligible work
 
-### 14.4 Operator Intervention Points
+### 15.4 Operator Intervention Points
 
 Operators can control behavior by:
 
@@ -1987,9 +2118,9 @@ Operators can control behavior by:
 - Restarting the service for process recovery or deployment (not as the normal path for applying
   workflow config changes).
 
-## 15. Security and Operational Safety
+## 16. Security and Operational Safety
 
-### 15.1 Trust Boundary Assumption
+### 16.1 Trust Boundary Assumption
 
 Each implementation defines its own trust boundary.
 
@@ -2002,7 +2133,7 @@ Operational safety requirements:
 - Workspace isolation and path validation are important baseline controls, but they are not a
   substitute for whatever approval and sandbox policy an implementation chooses.
 
-### 15.2 Filesystem Safety Requirements
+### 16.2 Filesystem Safety Requirements
 
 Mandatory:
 
@@ -2016,13 +2147,13 @@ RECOMMENDED additional hardening for ports:
 - Restrict workspace root permissions.
 - Mount workspace root on a dedicated volume if possible.
 
-### 15.3 Secret Handling
+### 16.3 Secret Handling
 
 - Support `$VAR` indirection in workflow config.
 - Do not log API tokens or secret env values.
 - Validate presence of secrets without printing them.
 
-### 15.4 Hook Script Safety
+### 16.4 Hook Script Safety
 
 Workspace hooks are arbitrary shell scripts from `WORKFLOW.md`.
 
@@ -2033,7 +2164,7 @@ Implications:
 - Hook output SHOULD be truncated in logs.
 - Hook timeouts are REQUIRED to avoid hanging the orchestrator.
 
-### 15.5 Harness Hardening Guidance
+### 16.5 Harness Hardening Guidance
 
 Running Codex agents against repositories, issue trackers, and other inputs that can contain
 sensitive data or externally-controlled content can be dangerous. A permissive deployment can lead
@@ -2061,9 +2192,9 @@ Possible hardening measures include:
 The correct controls are deployment-specific, but implementations SHOULD document them clearly and
 treat harness hardening as part of the core safety model rather than an optional afterthought.
 
-## 16. Reference Algorithms (Language-Agnostic)
+## 17. Reference Algorithms (Language-Agnostic)
 
-### 16.1 Service Startup
+### 17.1 Service Startup
 
 ```text
 function start_service():
@@ -2093,7 +2224,7 @@ function start_service():
   event_loop(state)
 ```
 
-### 16.2 Poll-and-Dispatch Tick
+### 17.2 Poll-and-Dispatch Tick
 
 ```text
 on_tick(state):
@@ -2125,7 +2256,7 @@ on_tick(state):
   return state
 ```
 
-### 16.3 Reconcile Active Runs
+### 17.3 Reconcile Active Runs
 
 ```text
 function reconcile_running_issues(state):
@@ -2151,7 +2282,7 @@ function reconcile_running_issues(state):
   return state
 ```
 
-### 16.4 Dispatch One Issue
+### 17.4 Dispatch One Issue
 
 ```text
 function dispatch_issue(issue, state, attempt):
@@ -2190,7 +2321,7 @@ function dispatch_issue(issue, state, attempt):
   return state
 ```
 
-### 16.5 Worker Attempt (Workspace + Prompt + Agent)
+### 17.5 Worker Attempt (Workspace + Prompt + Agent)
 
 ```text
 function run_agent_attempt(issue, attempt, orchestrator_channel):
@@ -2250,7 +2381,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   exit_normal()
 ```
 
-### 16.6 Worker Exit and Retry Handling
+### 17.6 Worker Exit and Retry Handling
 
 ```text
 on_worker_exit(issue_id, reason, state):
@@ -2300,7 +2431,7 @@ on_retry_timer(issue_id, state):
   return dispatch_issue(issue, state, attempt=retry_entry.attempt)
 ```
 
-## 17. Test and Validation Matrix
+## 18. Test and Validation Matrix
 
 A conforming implementation SHOULD include tests that cover the behaviors defined in this
 specification.
@@ -2316,7 +2447,7 @@ Validation profiles:
 Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bullets that begin with
 `If ... is implemented` are `Extension Conformance`.
 
-### 17.1 Workflow and Config Parsing
+### 18.1 Workflow and Config Parsing
 
 - Workflow file path precedence:
   - explicit runtime path is used when provided
@@ -2337,7 +2468,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
 
-### 17.2 Workspace Manager and Safety
+### 18.2 Workspace Manager and Safety
 
 - Deterministic workspace path per issue identifier
 - Missing workspace directory is created
@@ -2352,7 +2483,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Workspace path sanitization and root containment invariants are enforced before agent launch
 - Agent launch uses the per-issue workspace path as cwd and rejects out-of-root paths
 
-### 17.3 Issue Tracker Client
+### 18.3 Issue Tracker Client
 
 - Candidate issue fetch uses active states and project slug
 - Linear query uses the specified project filter field (`slugId`)
@@ -2364,7 +2495,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
 - Error mapping for request errors, non-200, GraphQL errors, malformed payloads
 
-### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
+### 18.4 Orchestrator Dispatch, Reconciliation, and Retry
 
 - Dispatch sort order is priority then oldest creation time
 - `Todo` issue with non-terminal blockers is not eligible
@@ -2383,7 +2514,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
-### 17.5 Coding-Agent App-Server Client
+### 18.5 Coding-Agent App-Server Client
 
 - Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
 - Session startup follows the targeted Codex app-server protocol.
@@ -2412,7 +2543,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
 
-### 17.6 Observability
+### 18.6 Observability
 
 - Validation failures are operator-visible
 - Structured logging includes issue/session context fields
@@ -2423,7 +2554,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - If humanized event summaries are implemented, they cover key wrapper/agent event classes without
   changing orchestrator behavior
 
-### 17.7 CLI and Host Lifecycle
+### 18.7 CLI and Host Lifecycle
 
 - CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
 - CLI uses `./WORKFLOW.md` when no workflow path argument is provided
@@ -2432,7 +2563,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
 
-### 17.8 Real Integration Profile (RECOMMENDED)
+### 18.8 Real Integration Profile (RECOMMENDED)
 
 These checks are RECOMMENDED for production readiness and MAY be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
@@ -2445,15 +2576,15 @@ network access, or external service permissions are unavailable.
 - If a real-integration profile is explicitly enabled in CI or release validation, failures SHOULD
   fail that job.
 
-## 18. Implementation Checklist (Definition of Done)
+## 19. Implementation Checklist (Definition of Done)
 
-Use the same validation profiles as Section 17:
+Use the same validation profiles as Section 18:
 
-- Section 18.1 = `Core Conformance`
-- Section 18.2 = `Extension Conformance`
-- Section 18.3 = `Real Integration Profile`
+- Section 19.1 = `Core Conformance`
+- Section 19.2 = `Extension Conformance`
+- Section 19.3 = `Real Integration Profile`
 
-### 18.1 REQUIRED for Conformance
+### 19.1 REQUIRED for Conformance
 
 - Workflow path selection supports explicit runtime path and cwd default
 - `WORKFLOW.md` loader with YAML front matter + prompt body split
@@ -2474,7 +2605,7 @@ Use the same validation profiles as Section 17:
 - Structured logs with `issue_id`, `issue_identifier`, and `session_id`
 - Operator-visible observability (structured logs; OPTIONAL snapshot/status surface)
 
-### 18.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
+### 19.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
 
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
@@ -2487,9 +2618,9 @@ Use the same validation profiles as Section 17:
   of only via agent tools.
 - TODO: Add pluggable issue tracker adapters beyond Linear.
 
-### 18.3 Operational Validation Before Production (RECOMMENDED)
+### 19.3 Operational Validation Before Production (RECOMMENDED)
 
-- Run the `Real Integration Profile` from Section 17.8 with valid credentials and network access.
+- Run the `Real Integration Profile` from Section 18.8 with valid credentials and network access.
 - Verify hook execution and workflow path resolution on the target host OS/shell environment.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
