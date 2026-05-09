@@ -38,9 +38,10 @@ type snapshotSource interface {
 // Handler bundles the dashboard's HTTP surface area. Construct it via
 // NewHandler and mount the returned http.Handler on an http.Server.
 type Handler struct {
-	orch snapshotSource
-	tmpl *template.Template
-	mux  *http.ServeMux
+	orch      snapshotSource
+	tmpl      *template.Template
+	mux       *http.ServeMux
+	broadcast *broadcaster
 }
 
 // NewHandler returns the dashboard's http.Handler. The orchestrator is the
@@ -50,8 +51,16 @@ type Handler struct {
 // The dashboard template is parsed once at construction time. Funcs() must
 // be registered before ParseFS — the template references helpers like
 // formatInt and ParseFS would otherwise fail.
+//
+// NewHandler also registers an OnUpdate callback on the orchestrator that
+// fans out to every connected WebSocket subscriber. The callback overwrites
+// any existing one — callers that need a custom update hook should compose
+// theirs around the broadcaster (or call WithUpdateCallback after
+// NewHandler returns, which will silently disable WS streaming).
 func NewHandler(orch *orchestrator.Orchestrator) http.Handler {
-	return newHandlerFromSource(orch)
+	h := newHandlerFromSource(orch)
+	orch.WithUpdateCallback(h.broadcast.broadcast)
+	return h
 }
 
 func newHandlerFromSource(orch snapshotSource) *Handler {
@@ -62,9 +71,10 @@ func newHandlerFromSource(orch snapshotSource) *Handler {
 	)
 
 	h := &Handler{
-		orch: orch,
-		tmpl: tmpl,
-		mux:  http.NewServeMux(),
+		orch:      orch,
+		tmpl:      tmpl,
+		mux:       http.NewServeMux(),
+		broadcast: newBroadcaster(),
 	}
 	h.routes()
 	return h
@@ -78,6 +88,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) routes() {
 	h.mux.HandleFunc("/", h.handleDashboard)
 	h.mux.HandleFunc("GET /static/{file}", h.handleStatic)
+	h.mux.HandleFunc("GET /ws", h.handleWS)
 
 	// API routes mirror the Elixir router's explicit `match(:*, ...)` style:
 	// dispatch on method inside one handler per path so 405 responses carry

@@ -1,8 +1,11 @@
 module github.com/openai/symphony/go
 
-go 1.22
+go 1.23
+
+toolchain go1.24.5
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/osteele/liquid v1.3.0
 	github.com/stretchr/testify v1.9.0
