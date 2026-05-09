@@ -1532,6 +1532,21 @@ Append the following block to the end of `proposal.md` within the slug directory
 - Other `active_states` and `terminal_states` from config are honored for dispatch eligibility
   checks using case-insensitive comparison.
 
+#### 11.7.6 `.symphony-done` Sentinel
+
+Implementations MUST honor a `.symphony-done` sentinel file. When `fetch_issue_states_by_ids`
+observes `<root>/changes/<slug>/.symphony-done`, it MUST:
+
+1. Remove the sentinel file.
+2. Transition the slug to `Done` per the rename rules in §11.7.4.
+3. Return `state="Done"` for that slug in the same call.
+
+This is the canonical in-band signal an in-workspace coding agent uses to mark a change complete
+without the orchestrator having to interpret tool-call output. Operators SHOULD make
+`<root>/changes/<slug>/` reachable from the per-issue workspace (for example via the `after_create`
+hook) so the agent can create the sentinel; that wiring is operator-side and out of scope for the
+tracker contract.
+
 ### 11.8 JIRA Tracker (`tracker.kind == "jira"`)
 
 The JIRA tracker integrates with JIRA Cloud REST API v3. Authentication uses HTTP Basic with

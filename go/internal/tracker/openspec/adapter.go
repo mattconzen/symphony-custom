@@ -243,13 +243,29 @@ func (a *Adapter) FetchIssuesByStates(_ context.Context, states []string) ([]dom
 
 // FetchIssueStatesByIDs looks up each ID (slug) in changes/ then archive/,
 // returning the derived state. Slugs not found are omitted without error.
-func (a *Adapter) FetchIssueStatesByIDs(_ context.Context, ids []string) ([]domain.Issue, error) {
+//
+// Per SPEC §11.7: if changes/<slug>/.symphony-done exists, the sentinel is
+// removed, the slug is auto-archived, and the returned state is "Done".
+func (a *Adapter) FetchIssueStatesByIDs(ctx context.Context, ids []string) ([]domain.Issue, error) {
 	var issues []domain.Issue
 	for _, id := range ids {
 		dirPath, state := a.locateSlug(id)
 		if dirPath == "" {
 			// Not found — omit per spec.
 			continue
+		}
+		if state != "Done" {
+			sentinel := filepath.Join(dirPath, ".symphony-done")
+			if _, statErr := os.Stat(sentinel); statErr == nil {
+				if err := os.Remove(sentinel); err != nil {
+					return nil, fmt.Errorf("openspec: removing .symphony-done for %s: %w", id, err)
+				}
+				if err := a.UpdateIssueState(ctx, id, "Done"); err != nil {
+					return nil, fmt.Errorf("openspec: auto-archiving %s on sentinel: %w", id, err)
+				}
+				dirPath = filepath.Join(a.archiveDir(), id)
+				state = "Done"
+			}
 		}
 		issue, err := a.issueFromSlug(id, dirPath, state)
 		if err != nil {
