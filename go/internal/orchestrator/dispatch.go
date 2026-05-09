@@ -31,6 +31,12 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
 		return
 	}
 
+	o.mu.Lock()
+	if entry, ok := o.running[issue.ID]; ok {
+		entry.workspacePath = ws.Path
+	}
+	o.mu.Unlock()
+
 	// before_run hook.
 	if o.cfg.Hooks.BeforeRun != "" {
 		timeout := time.Duration(o.cfg.Hooks.TimeoutMs) * time.Millisecond
@@ -50,6 +56,13 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
 		o.scheduleRetry(issue, err)
 		return
 	}
+
+	o.mu.Lock()
+	if entry, ok := o.running[issue.ID]; ok {
+		entry.sessionID = sess.ID
+	}
+	o.mu.Unlock()
+	o.notify()
 
 	sessionLog := log.WithSession(sess.ID)
 	runErr := o.runTurnLoop(ctx, issue, ws, sess, sessionLog)
@@ -153,6 +166,9 @@ func (o *Orchestrator) runTurnLoop(
 			"tokens_total", result.Tokens.TotalTokens,
 		)
 
+		o.recordTurnComplete(issue.ID, turn, result)
+		o.notify()
+
 		switch result.Status {
 		case agent.TurnCompleted:
 			// Issue is still active — run between_turns hook before continuing.
@@ -237,6 +253,31 @@ func (o *Orchestrator) runBetweenTurnsHook(
 
 	log.Info("between_turns hook succeeded", "turn", turn)
 	return ""
+}
+
+// recordTurnComplete folds turn-level token usage and turn count into the
+// running entry and the global codex_totals so the observability snapshot
+// reflects post-turn state. Mirrors Elixir's apply_codex_token_delta /
+// integrate_codex_update path that runs before notify_dashboard().
+func (o *Orchestrator) recordTurnComplete(issueID string, turn int, result agent.TurnResult) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	entry, ok := o.running[issueID]
+	if !ok {
+		return
+	}
+
+	entry.turnCount = turn
+	entry.lastEvent = "turn_completed"
+	entry.lastEventAt = time.Now().UTC()
+	entry.tokens.InputTokens += result.Tokens.InputTokens
+	entry.tokens.OutputTokens += result.Tokens.OutputTokens
+	entry.tokens.TotalTokens += result.Tokens.TotalTokens
+
+	o.codexTotals.InputTokens += result.Tokens.InputTokens
+	o.codexTotals.OutputTokens += result.Tokens.OutputTokens
+	o.codexTotals.TotalTokens += result.Tokens.TotalTokens
 }
 
 // truncateOutput truncates output to at most maxBytes. If truncated, appends a

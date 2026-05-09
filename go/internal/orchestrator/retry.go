@@ -98,6 +98,9 @@ func (o *Orchestrator) scheduleRetry(issue domain.Issue, runErr error) {
 		"err", errMsg,
 	)
 
+	// Mirrors Elixir handle_info({:retry_issue, ...}) → notify_dashboard().
+	o.notify()
+
 	time.AfterFunc(time.Duration(delayMs)*time.Millisecond, func() {
 		// Use the orchestrator-level context (not the per-issue dispatch context,
 		// which is already cancelled by the time this timer fires).
@@ -118,5 +121,6 @@ func (o *Orchestrator) scheduleRetry(issue domain.Issue, runErr error) {
 		o.mu.Lock()
 		delete(o.retryAttempts, issue.ID)
 		o.mu.Unlock()
+		o.notify()
 	})
 }

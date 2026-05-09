@@ -16,10 +16,22 @@ import (
 	"github.com/openai/symphony/go/internal/workspace"
 )
 
-// runEntry tracks an in-flight dispatch for one issue.
+// runEntry tracks an in-flight dispatch for one issue. Fields beyond
+// (issue, cancel) feed the observability snapshot and mirror the per-running
+// projection in Elixir's StatusDashboard / Presenter.
 type runEntry struct {
 	issue  domain.Issue
 	cancel context.CancelFunc
+
+	startedAt     time.Time
+	sessionID     string
+	workspacePath string
+	workerHost    string
+	turnCount     int
+	lastEvent     string
+	lastMessage   string
+	lastEventAt   time.Time
+	tokens        observability.EntryTokens
 }
 
 // Orchestrator is the poll-loop coordinator per SPEC §§7–8.
@@ -44,6 +56,15 @@ type Orchestrator struct {
 	running       map[string]*runEntry
 	claimed       map[string]struct{}
 	retryAttempts map[string]*domain.RetryEntry
+	codexTotals   observability.TokenTotals
+	rateLimits    any
+
+	// onUpdate is fired (outside the lock) whenever observable orchestrator
+	// state changes — dispatch start, turn complete, dispatch finish,
+	// reconcile state-change, retry scheduled. Mirrors the Elixir
+	// StatusDashboard.notify_update / ObservabilityPubSub.broadcast_update
+	// fan-out so the web dashboard can react without polling.
+	onUpdate func()
 }
 
 // New returns an Orchestrator wired with the provided dependencies.
@@ -71,6 +92,28 @@ func New(
 func (o *Orchestrator) WithPromptTemplate(tmpl string) *Orchestrator {
 	o.promptTemplate = tmpl
 	return o
+}
+
+// WithUpdateCallback registers cb to be invoked when observable orchestrator
+// state changes. Pass nil to clear. The callback runs synchronously on the
+// firing goroutine; keep it cheap (e.g. non-blocking channel send).
+func (o *Orchestrator) WithUpdateCallback(cb func()) *Orchestrator {
+	o.mu.Lock()
+	o.onUpdate = cb
+	o.mu.Unlock()
+	return o
+}
+
+// notify fires the registered OnUpdate callback. Safe to call when no
+// callback is set. Must be called with o.mu unlocked to avoid forcing
+// callback handlers into the lock's critical section.
+func (o *Orchestrator) notify() {
+	o.mu.Lock()
+	cb := o.onUpdate
+	o.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
 }
 
 // startupCleanup queries the tracker for terminal-state issues and removes
@@ -198,8 +241,15 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		}
 		o.claimed[issue.ID] = struct{}{}
 		issueCtx, cancel := context.WithCancel(ctx)
-		o.running[issue.ID] = &runEntry{issue: issue, cancel: cancel}
+		o.running[issue.ID] = &runEntry{
+			issue:     issue,
+			cancel:    cancel,
+			startedAt: time.Now().UTC(),
+		}
 		o.mu.Unlock()
+
+		// Mirrors Elixir handle_info(:run_poll_cycle) → notify_dashboard().
+		o.notify()
 
 		go func(iss domain.Issue, runCtx context.Context, cancelFn context.CancelFunc) {
 			defer cancelFn()
@@ -233,25 +283,48 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 		terminalSet[strings.ToLower(s)] = true
 	}
 
+	stateChanged := false
 	for _, issue := range updated {
-		if terminalSet[strings.ToLower(issue.State)] {
-			o.mu.Lock()
-			if entry, ok := o.running[issue.ID]; ok {
-				o.log.Info("reconcile: cancelling dispatch (terminal state)",
-					"issue_id", issue.ID,
-					"state", issue.State,
-				)
-				entry.cancel()
-			}
-			o.mu.Unlock()
+		o.mu.Lock()
+		entry, ok := o.running[issue.ID]
+		if ok && entry.issue.State != issue.State {
+			entry.issue.State = issue.State
+			stateChanged = true
 		}
+		isTerminal := terminalSet[strings.ToLower(issue.State)]
+		if isTerminal && ok {
+			o.log.Info("reconcile: cancelling dispatch (terminal state)",
+				"issue_id", issue.ID,
+				"state", issue.State,
+			)
+			entry.cancel()
+			stateChanged = true
+		}
+		o.mu.Unlock()
+	}
+
+	if stateChanged {
+		// Mirrors Elixir reconcile path that ends in notify_dashboard().
+		o.notify()
 	}
 }
 
-// releaseClaim removes the claim and running entry for the given issue ID.
+// releaseClaim removes the claim and running entry for the given issue ID and
+// rolls the entry's runtime seconds into the global codex_totals so the
+// dashboard's cumulative runtime keeps growing across completed sessions
+// (parity with Elixir record_session_completion_totals).
 func (o *Orchestrator) releaseClaim(issueID string) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
+	if entry, ok := o.running[issueID]; ok && !entry.startedAt.IsZero() {
+		secs := int(time.Since(entry.startedAt).Seconds())
+		if secs > 0 {
+			o.codexTotals.SecondsRunning += secs
+		}
+	}
 	delete(o.claimed, issueID)
 	delete(o.running, issueID)
+	o.mu.Unlock()
+
+	// Mirrors Elixir handle_info({:DOWN, ...}) → notify_dashboard().
+	o.notify()
 }
