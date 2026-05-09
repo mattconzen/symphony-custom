@@ -5,8 +5,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.WorkItems
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
+
+  @kanban_columns [
+    {"Backlog", "Task exists, but needs an OpenSpec spec."},
+    {"Ready", "Spec defined; ready for an agent to pick up."},
+    {"In Progress", "Agents are working on the task."},
+    {"In Review", "Agents finished; PR awaiting review."},
+    {"Done", "PR merged."}
+  ]
 
   @impl true
   def mount(_params, _session, socket) do
@@ -14,6 +23,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
       socket
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
+      |> assign(:connected, connected?(socket))
+      |> assign(:work_items, WorkItems.list())
+      |> assign(:active_modal, nil)
+      |> assign(:work_item_form_error, nil)
+      |> assign(:editing_item_id, nil)
+      |> assign(:spec_draft, "")
+      |> assign(:spec_modal_mode, :view)
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -21,6 +37,93 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
 
     {:ok, socket}
+  end
+
+  @impl true
+  def handle_event("open_new_work_item", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:active_modal, :new_work_item)
+     |> assign(:work_item_form_error, nil)}
+  end
+
+  def handle_event("close_modal", _params, socket) do
+    {:noreply, close_modal(socket)}
+  end
+
+  def handle_event("create_work_item", params, socket) do
+    title = params |> Map.get("title", "") |> to_string() |> String.trim()
+    body = params |> Map.get("body", "") |> to_string()
+
+    case WorkItems.create(%{"title" => title, "body" => body}) do
+      {:ok, _item} ->
+        {:noreply,
+         socket
+         |> assign(:work_items, WorkItems.list())
+         |> close_modal()}
+
+      {:error, :title_required} ->
+        {:noreply, assign(socket, :work_item_form_error, "Title is required")}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :work_item_form_error, "Could not create work item: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("view_spec", %{"id" => id}, socket) do
+    case find_work_item(socket, id) do
+      nil ->
+        {:noreply, socket}
+
+      item ->
+        {:noreply,
+         socket
+         |> assign(:active_modal, :spec)
+         |> assign(:editing_item_id, item.id)
+         |> assign(:spec_draft, item.spec || "")
+         |> assign(:spec_modal_mode, :view)}
+    end
+  end
+
+  def handle_event("edit_spec", %{"id" => id}, socket) do
+    case find_work_item(socket, id) do
+      nil ->
+        {:noreply, socket}
+
+      item ->
+        {:noreply,
+         socket
+         |> assign(:active_modal, :spec)
+         |> assign(:editing_item_id, item.id)
+         |> assign(:spec_draft, item.spec || "")
+         |> assign(:spec_modal_mode, :edit)}
+    end
+  end
+
+  def handle_event("save_spec", params, socket) do
+    id = socket.assigns.editing_item_id
+    spec = params |> Map.get("spec", "") |> to_string()
+
+    case id && WorkItems.update_spec(id, spec) do
+      {:ok, _item} ->
+        {:noreply,
+         socket
+         |> assign(:work_items, WorkItems.list())
+         |> close_modal()}
+
+      _ ->
+        {:noreply, close_modal(socket)}
+    end
+  end
+
+  def handle_event("advance_state", %{"id" => id, "to" => to_state}, socket) do
+    case WorkItems.set_state(id, to_state) do
+      {:ok, _item} ->
+        {:noreply, assign(socket, :work_items, WorkItems.list())}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
 
   @impl true
@@ -34,6 +137,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:noreply,
      socket
      |> assign(:payload, load_payload())
+     |> assign(:work_items, WorkItems.list())
      |> assign(:now, DateTime.utc_now())}
   end
 
@@ -56,17 +160,147 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
 
           <div class="status-stack">
-            <span class="status-badge status-badge-live">
-              <span class="status-badge-dot"></span>
-              Live
-            </span>
-            <span class="status-badge status-badge-offline">
-              <span class="status-badge-dot"></span>
-              Offline
-            </span>
+            <%= if @connected do %>
+              <span class="status-badge status-badge-live">
+                <span class="status-badge-dot"></span>
+                Live
+              </span>
+            <% else %>
+              <span class="status-badge status-badge-offline">
+                <span class="status-badge-dot"></span>
+                Offline
+              </span>
+            <% end %>
           </div>
         </div>
       </header>
+
+      <section class="section-card kanban-section">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">Work items</h2>
+            <p class="section-copy">Kanban board for tasks tracked by this Symphony runtime.</p>
+          </div>
+
+          <button
+            type="button"
+            class="primary-button"
+            phx-click="open_new_work_item"
+          >
+            New Work Item
+          </button>
+        </div>
+
+        <div class="kanban-board">
+          <div :for={{column_state, column_copy} <- kanban_columns()} class="kanban-column">
+            <header class="kanban-column-header">
+              <h3 class="kanban-column-title"><%= column_state %></h3>
+              <span class="kanban-column-count numeric"><%= length(work_items_for_column(@work_items, column_state)) %></span>
+            </header>
+            <p class="kanban-column-copy"><%= column_copy %></p>
+
+            <ul class="kanban-card-list">
+              <li :for={item <- work_items_for_column(@work_items, column_state)} class="kanban-card">
+                <p class="kanban-card-title"><%= item.title %></p>
+                <%= if item.body && item.body != "" do %>
+                  <p class="kanban-card-body"><%= summarize(item.body) %></p>
+                <% end %>
+                <%= if item.pr_url do %>
+                  <p class="kanban-card-meta">
+                    <a class="issue-link" href={item.pr_url} target="_blank" rel="noopener">PR <%= if item.pr_merged, do: "(merged)", else: "(open)" %></a>
+                  </p>
+                <% end %>
+
+                <div class="kanban-card-actions">
+                  <%= if item.spec do %>
+                    <button type="button" class="subtle-button" phx-click="view_spec" phx-value-id={item.id}>View OpenSpec</button>
+                  <% end %>
+                  <button type="button" class="subtle-button" phx-click="edit_spec" phx-value-id={item.id}>
+                    <%= if item.spec, do: "Edit OpenSpec", else: "Add OpenSpec" %>
+                  </button>
+                  <%= for next_state <- next_states(item.state) do %>
+                    <button
+                      type="button"
+                      class="subtle-button"
+                      phx-click="advance_state"
+                      phx-value-id={item.id}
+                      phx-value-to={next_state}
+                    >&rarr; <%= next_state %></button>
+                  <% end %>
+                </div>
+              </li>
+            </ul>
+
+            <%= if work_items_for_column(@work_items, column_state) == [] do %>
+              <p class="empty-state">No items.</p>
+            <% end %>
+          </div>
+        </div>
+      </section>
+
+      <%= if @active_modal == :new_work_item do %>
+        <div class="modal-overlay" phx-click="close_modal">
+          <div class="modal-card" onclick="event.stopPropagation();">
+            <header class="modal-header">
+              <h2 class="modal-title">New Work Item</h2>
+              <button type="button" class="subtle-button" phx-click="close_modal">Close</button>
+            </header>
+
+            <form phx-submit="create_work_item" class="modal-form">
+              <label class="modal-label" for="new-work-item-title">Title</label>
+              <input id="new-work-item-title" name="title" type="text" class="modal-input" autofocus />
+
+              <label class="modal-label" for="new-work-item-body">Markdown task</label>
+              <textarea id="new-work-item-body" name="body" class="modal-textarea" rows="12" placeholder="# Describe the task in Markdown..."></textarea>
+
+              <%= if @work_item_form_error do %>
+                <p class="modal-error"><%= @work_item_form_error %></p>
+              <% end %>
+
+              <div class="modal-actions">
+                <button type="button" class="subtle-button" phx-click="close_modal">Cancel</button>
+                <button type="submit" class="primary-button">Create</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      <% end %>
+
+      <%= if @active_modal == :spec do %>
+        <div class="modal-overlay" phx-click="close_modal">
+          <div class="modal-card" onclick="event.stopPropagation();">
+            <header class="modal-header">
+              <h2 class="modal-title">
+                <%= if @spec_modal_mode == :edit, do: "Edit OpenSpec", else: "View OpenSpec" %>
+              </h2>
+              <button type="button" class="subtle-button" phx-click="close_modal">Close</button>
+            </header>
+
+            <%= if @spec_modal_mode == :view do %>
+              <pre class="code-panel"><%= if @spec_draft == "", do: "No spec defined.", else: @spec_draft %></pre>
+              <div class="modal-actions">
+                <button
+                  type="button"
+                  class="primary-button"
+                  phx-click="edit_spec"
+                  phx-value-id={@editing_item_id}
+                >Edit</button>
+                <button type="button" class="subtle-button" phx-click="close_modal">Close</button>
+              </div>
+            <% else %>
+              <form phx-submit="save_spec" class="modal-form">
+                <label class="modal-label" for="spec-draft">OpenSpec (Markdown)</label>
+                <textarea id="spec-draft" name="spec" class="modal-textarea" rows="16"><%= @spec_draft %></textarea>
+
+                <div class="modal-actions">
+                  <button type="button" class="subtle-button" phx-click="close_modal">Cancel</button>
+                  <button type="submit" class="primary-button">Save</button>
+                </div>
+              </form>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
 
       <%= if @payload[:error] do %>
         <section class="error-card">
@@ -102,7 +336,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <article class="metric-card">
             <p class="metric-label">Runtime</p>
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
-            <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
+            <p class="metric-detail">Total agent runtime across completed and active sessions.</p>
           </article>
         </section>
 
@@ -144,7 +378,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>State</th>
                     <th>Session</th>
                     <th>Runtime / turns</th>
-                    <th>Codex update</th>
+                    <th>Agent update</th>
                     <th>Tokens</th>
                   </tr>
                 </thead>
@@ -252,6 +486,49 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp load_payload do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
   end
+
+  defp close_modal(socket) do
+    socket
+    |> assign(:active_modal, nil)
+    |> assign(:work_item_form_error, nil)
+    |> assign(:editing_item_id, nil)
+    |> assign(:spec_draft, "")
+    |> assign(:spec_modal_mode, :view)
+  end
+
+  defp find_work_item(socket, id) do
+    socket.assigns
+    |> Map.get(:work_items, [])
+    |> Enum.find(fn item -> item.id == id end)
+  end
+
+  defp kanban_columns, do: @kanban_columns
+
+  defp work_items_for_column(work_items, column_state) when is_list(work_items) do
+    Enum.filter(work_items, fn item -> item.state == column_state end)
+  end
+
+  defp next_states(current_state) do
+    states = WorkItems.states()
+
+    case Enum.find_index(states, &(&1 == current_state)) do
+      nil -> []
+      idx when idx + 1 < length(states) -> [Enum.at(states, idx + 1)]
+      _ -> []
+    end
+  end
+
+  defp summarize(text) when is_binary(text) do
+    trimmed = String.trim(text)
+
+    if String.length(trimmed) > 160 do
+      String.slice(trimmed, 0, 160) <> "…"
+    else
+      trimmed
+    end
+  end
+
+  defp summarize(_text), do: ""
 
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator

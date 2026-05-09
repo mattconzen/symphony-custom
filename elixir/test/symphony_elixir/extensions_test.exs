@@ -505,8 +505,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
     assert dashboard_css =~ ":root {"
     assert dashboard_css =~ ".status-badge-live"
-    assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
-    assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
+    assert dashboard_css =~ ".status-badge-offline"
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -544,16 +543,20 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "MT-RETRY"
     assert html =~ "rendered"
     assert html =~ "Runtime"
-    assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
-    assert html =~ "Codex update"
+    assert html =~ "Agent update"
+    refute html =~ "Codex update"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
     refute html =~ "Transport"
-    assert html =~ "status-badge-live"
+    refute html =~ "status-badge-live"
     assert html =~ "status-badge-offline"
+
+    connected_html = render(view)
+    assert connected_html =~ "status-badge-live"
+    refute connected_html =~ "status-badge-offline"
 
     updated_snapshot =
       put_in(snapshot.running, [
