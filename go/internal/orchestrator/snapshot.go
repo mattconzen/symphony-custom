@@ -53,7 +53,26 @@ func (o *Orchestrator) Snapshot() observability.Snapshot {
 		RateLimits:  o.rateLimits,
 		Running:     running,
 		Retrying:    retrying,
+		Polling:     o.buildPolling(),
 	}
+}
+
+// buildPolling derives the Polling projection. Caller must hold o.mu.
+func (o *Orchestrator) buildPolling() observability.Polling {
+	p := observability.Polling{
+		Checking:       o.pollChecking,
+		PollIntervalMs: o.cfg.Polling.IntervalMs,
+	}
+	if o.lastPollAt.IsZero() {
+		return p
+	}
+	next := o.lastPollAt.Add(time.Duration(o.cfg.Polling.IntervalMs) * time.Millisecond)
+	ms := int(time.Until(next).Milliseconds())
+	if ms < 0 {
+		ms = 0
+	}
+	p.NextPollInMs = ms
+	return p
 }
 
 func runEntryToSnapshot(e *runEntry) observability.RunningEntry {

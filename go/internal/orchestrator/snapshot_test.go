@@ -146,6 +146,37 @@ func TestBuildSnapshot_EmptyOrchestrator(t *testing.T) {
 	assert.False(t, snap.GeneratedAt.IsZero())
 }
 
+func TestBuildSnapshot_Polling(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Polling.IntervalMs = 2000
+	o := New(cfg, nil, nil, nil, observability.New(&bytes.Buffer{}))
+
+	// Pre-poll: lastPollAt is zero, NextPollInMs MUST be 0.
+	snap := o.Snapshot()
+	assert.False(t, snap.Polling.Checking, "no poll in flight yet")
+	assert.Equal(t, 2000, snap.Polling.PollIntervalMs)
+	assert.Equal(t, 0, snap.Polling.NextPollInMs, "lastPollAt zero ⇒ next_poll_in_ms 0")
+
+	// Post-poll: simulate a poll that finished 500ms ago. NextPollInMs should
+	// be roughly 1500ms — bound it to (0, IntervalMs] to absorb test jitter.
+	o.mu.Lock()
+	o.lastPollAt = time.Now().Add(-500 * time.Millisecond)
+	o.mu.Unlock()
+
+	snap = o.Snapshot()
+	assert.False(t, snap.Polling.Checking)
+	assert.Equal(t, 2000, snap.Polling.PollIntervalMs)
+	assert.Greater(t, snap.Polling.NextPollInMs, 0, "should be positive")
+	assert.LessOrEqual(t, snap.Polling.NextPollInMs, 2000, "should be ≤ interval")
+
+	// Checking flag mirrors pollChecking under the lock.
+	o.mu.Lock()
+	o.pollChecking = true
+	o.mu.Unlock()
+	snap = o.Snapshot()
+	assert.True(t, snap.Polling.Checking)
+}
+
 func TestWithUpdateCallback_FiresOnDispatch(t *testing.T) {
 	cfg := config.Config{}
 	cfg.Tracker.Kind = "memory"

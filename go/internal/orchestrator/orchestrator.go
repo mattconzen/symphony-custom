@@ -59,6 +59,13 @@ type Orchestrator struct {
 	codexTotals   observability.TokenTotals
 	rateLimits    any
 
+	// pollChecking is true while a tracker fetch is in flight inside tick.
+	// Surfaced via Snapshot.Polling.Checking. Guarded by mu.
+	pollChecking bool
+	// lastPollAt is the wall-clock time at which the most recent successful
+	// poll completed. Zero before the first poll. Guarded by mu.
+	lastPollAt time.Time
+
 	// refreshC carries out-of-band refresh requests. Capacity 1 so a single
 	// pending request coalesces additional calls. Read by Run's select; written
 	// by RequestRefresh.
@@ -224,6 +231,18 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 // tick is one poll iteration.
 func (o *Orchestrator) tick(ctx context.Context) {
+	// Surface poll-in-flight state to Snapshot.Polling. Toggled around the
+	// whole tick because reconcile + candidate fetch both hit the tracker.
+	o.mu.Lock()
+	o.pollChecking = true
+	o.mu.Unlock()
+	defer func() {
+		o.mu.Lock()
+		o.pollChecking = false
+		o.lastPollAt = time.Now()
+		o.mu.Unlock()
+	}()
+
 	// 1. Re-validate preflight; skip dispatch on failure but keep reconciling.
 	if err := config.Preflight(o.cfg); err != nil {
 		o.log.Warn("preflight failed, skipping dispatch", "err", fmt.Sprintf("%v", err))

@@ -1938,10 +1938,11 @@ The Go runtime MUST mount the following routes when `-port>0`:
 | ------ | ----------------------------- | ------ | ---------------------------------------------------------------- |
 | GET    | `/`                           | 200    | Server-rendered HTML (`text/html; charset=utf-8`).               |
 | GET    | `/ws`                         | 101    | WebSocket upgrade (see §14.4).                                   |
+| GET    | `/issue/{issue_identifier}`   | 200/404| Server-rendered issue detail HTML (`text/html; charset=utf-8`).  |
 | GET    | `/static/{file}`              | 200    | Embedded asset; `Cache-Control: public, max-age=3600`.           |
 | GET    | `/api/v1/state`               | 200    | Orchestrator snapshot JSON (see §14.3).                          |
 | GET    | `/api/v1/{issue_identifier}`  | 200/404| Per-issue payload or `issue_not_found` error.                    |
-| POST   | `/api/v1/refresh`             | 202    | `{"queued":true,"coalesced":false,"requested_at":"…","operations":["poll","reconcile"]}`. |
+| POST   | `/api/v1/refresh`             | 202    | `{"queued":true,"coalesced":bool,"requested_at":"…","operations":["poll","reconcile"]}`. |
 
 Normative requirements:
 
@@ -1988,10 +1989,17 @@ Mandatory top-level keys mirroring Elixir's Presenter:
 - `retrying[]` — one entry per scheduled retry.
 - `rate_limits` — latest agent-runtime rate-limit payload, or `null` if unset.
 - `generated_at` — RFC3339 timestamp at which the snapshot was assembled.
+- `polling` — orchestrator poll-loop state (see below).
 
 The Go runtime constructs the snapshot synchronously by reading orchestrator state under its
 single mutex; the `timeout` and `unavailable` snapshot error modes from §13.3 are NOT emitted
 because there is no asynchronous boundary that could surface them.
+
+The `polling` object exposes the orchestrator's poll-loop state. `checking` is `true` while a
+tracker fetch is in flight. `poll_interval_ms` is the configured tick interval.
+`next_poll_in_ms` is best-effort: it MAY be `0` immediately before a poll fires, and SHOULD be
+treated as a hint, not a guarantee. Implementations that have not yet polled (lastPollAt is
+zero) MUST return `0`.
 
 ### 14.4 Real-time update protocol
 
