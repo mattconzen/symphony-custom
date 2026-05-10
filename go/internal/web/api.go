@@ -60,15 +60,15 @@ func (h *Handler) handleAPIIssue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
-// handleAPIRefresh acknowledges a refresh request. The Go orchestrator polls
-// on its own tick loop; there is no out-of-band trigger plumbed yet, so the
-// success envelope is informational. Returns 202 unconditionally; Elixir's
-// :unavailable branch corresponds to a dead orchestrator process, which has
-// no analogue here.
+// handleAPIRefresh schedules an immediate orchestrator poll via
+// RequestRefresh. `coalesced` is true when a refresh was already pending
+// (the request was deduplicated against the in-flight one); false when a
+// fresh refresh was queued.
 func (h *Handler) handleAPIRefresh(w http.ResponseWriter, r *http.Request) {
+	queued := h.orch.RequestRefresh()
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"queued":       true,
-		"coalesced":    false,
+		"coalesced":    !queued,
 		"requested_at": time.Now().UTC().Truncate(time.Second).Format(time.RFC3339),
 		"operations":   []string{"poll", "reconcile"},
 	})

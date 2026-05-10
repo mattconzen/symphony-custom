@@ -14,19 +14,25 @@ import (
 // a full orchestrator. The dashboard template only reads fields off the
 // snapshot, so a zero-valued Snapshot is enough to exercise the handler.
 type fakeSource struct {
-	snap          observability.Snapshot
-	workspaceRoot string
+	snap            observability.Snapshot
+	workspaceRoot   string
+	refreshQueued   bool // value RequestRefresh returns
+	refreshCalls    int
 }
 
 func (f *fakeSource) Snapshot() observability.Snapshot { return f.snap }
 func (f *fakeSource) WorkspaceRoot() string            { return f.workspaceRoot }
+func (f *fakeSource) RequestRefresh() bool {
+	f.refreshCalls++
+	return f.refreshQueued
+}
 
 func newTestHandler(snap observability.Snapshot) *Handler {
-	return newHandlerFromSource(&fakeSource{snap: snap})
+	return newHandlerFromSource(&fakeSource{snap: snap, refreshQueued: true})
 }
 
 func newTestHandlerWithRoot(snap observability.Snapshot, root string) *Handler {
-	return newHandlerFromSource(&fakeSource{snap: snap, workspaceRoot: root})
+	return newHandlerFromSource(&fakeSource{snap: snap, workspaceRoot: root, refreshQueued: true})
 }
 
 func TestHandleDashboard_RendersOK(t *testing.T) {

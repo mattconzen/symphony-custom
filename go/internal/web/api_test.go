@@ -290,10 +290,11 @@ func TestAPIIssue_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestAPIRefresh_Accepted(t *testing.T) {
+func TestAPIRefresh_Accepted_NotCoalesced(t *testing.T) {
 	t.Parallel()
 
-	h := newTestHandler(observability.Snapshot{})
+	src := &fakeSource{refreshQueued: true}
+	h := newHandlerFromSource(src)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
@@ -314,12 +315,50 @@ func TestAPIRefresh_Accepted(t *testing.T) {
 	if got["queued"] != true {
 		t.Errorf("queued: got %v want true", got["queued"])
 	}
+	if got["coalesced"] != false {
+		t.Errorf("coalesced: got %v want false", got["coalesced"])
+	}
 	if got["requested_at"] == nil {
 		t.Errorf("requested_at should be set")
 	}
 	ops, _ := got["operations"].([]any)
 	if len(ops) != 2 || ops[0] != "poll" || ops[1] != "reconcile" {
 		t.Errorf("operations: got %v want [poll, reconcile]", ops)
+	}
+	if src.refreshCalls != 1 {
+		t.Errorf("RequestRefresh calls: got %d want 1", src.refreshCalls)
+	}
+}
+
+func TestAPIRefresh_Accepted_Coalesced(t *testing.T) {
+	t.Parallel()
+
+	// refreshQueued=false simulates a refresh already pending — RequestRefresh
+	// returns false so coalesced=true.
+	src := &fakeSource{refreshQueued: false}
+	h := newHandlerFromSource(src)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Post(srv.URL+"/api/v1/refresh", "", nil)
+	if err != nil {
+		t.Fatalf("POST refresh: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["coalesced"] != true {
+		t.Errorf("coalesced: got %v want true", got["coalesced"])
+	}
+	if src.refreshCalls != 1 {
+		t.Errorf("RequestRefresh calls: got %d want 1", src.refreshCalls)
 	}
 }
 

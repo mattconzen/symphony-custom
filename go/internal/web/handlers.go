@@ -34,6 +34,7 @@ type dashboardError struct {
 type snapshotSource interface {
 	Snapshot() observability.Snapshot
 	WorkspaceRoot() string
+	RequestRefresh() bool
 }
 
 // Handler bundles the dashboard's HTTP surface area. Construct it via
