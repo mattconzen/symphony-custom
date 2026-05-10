@@ -94,6 +94,11 @@ func (o *Orchestrator) WithPromptTemplate(tmpl string) *Orchestrator {
 	return o
 }
 
+// WorkspaceRoot returns the configured workspace root directory. The web layer
+// uses this to synthesize a workspace path for issues whose runtime entry has
+// not yet recorded one (parity with Elixir's Presenter behaviour).
+func (o *Orchestrator) WorkspaceRoot() string { return o.cfg.Workspace.Root }
+
 // WithUpdateCallback registers cb to be invoked when observable orchestrator
 // state changes. Pass nil to clear. The callback runs synchronously on the
 // firing goroutine; keep it cheap (e.g. non-blocking channel send).
