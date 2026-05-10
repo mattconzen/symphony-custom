@@ -191,50 +191,6 @@ pre,
   min-width: min(100%, 9rem);
 }
 
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-height: 2rem;
-  padding: 0.35rem 0.78rem;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--card-muted);
-  color: var(--muted);
-  font-size: 0.82rem;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-}
-
-.status-badge-dot {
-  width: 0.52rem;
-  height: 0.52rem;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.9;
-}
-
-.status-badge-live {
-  display: none;
-  background: var(--accent-soft);
-  border-color: rgba(16, 163, 127, 0.18);
-  color: var(--accent-ink);
-}
-
-.status-badge-offline {
-  background: #f5f5f7;
-  border-color: var(--line-strong);
-  color: var(--muted);
-}
-
-[data-phx-main].phx-connected .status-badge-live {
-  display: inline-flex;
-}
-
-[data-phx-main].phx-connected .status-badge-offline {
-  display: none;
-}
-
 .ws-status {
   display: inline-flex;
   align-items: center;
@@ -597,4 +553,235 @@ pre,
     border-radius: 20px;
     padding: 1rem;
   }
+}
+
+/* Kanban */
+.kanban-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 1rem;
+}
+
+.kanban-column {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  background: var(--card-muted);
+  border-radius: 14px;
+  padding: 0.75rem 0.6rem;
+  min-height: 8rem;
+}
+
+.kanban-column-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  padding: 0 0.2rem;
+}
+
+.kanban-column-title {
+  font-weight: 700;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.kanban-column-count {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--card);
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+}
+
+.kanban-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.kanban-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+
+.kanban-card:hover {
+  border-color: var(--line-strong);
+  transform: translateY(-1px);
+}
+
+.kanban-card-link {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  padding: 0.55rem 0.65rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.kanban-card-id {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.kanban-card-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  line-height: 1.25;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.kanban-card-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.kanban-empty {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-align: center;
+  padding: 0.6rem 0;
+}
+
+@media (max-width: 1024px) {
+  .kanban-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .kanban-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* New work item modal */
+dialog.new-item-modal {
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--text);
+  padding: 1.1rem 1.2rem;
+  max-width: 32rem;
+  width: 92%;
+}
+
+dialog.new-item-modal::backdrop {
+  background: rgba(15, 15, 15, 0.32);
+}
+
+.new-item-modal h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.05rem;
+}
+
+.new-item-modal label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-top: 0.7rem;
+}
+
+.new-item-modal input,
+.new-item-modal textarea {
+  width: 100%;
+  font: inherit;
+  margin-top: 0.25rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card-muted);
+  color: var(--text);
+  resize: vertical;
+}
+
+.new-item-modal textarea {
+  min-height: 8rem;
+}
+
+.new-item-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 0.9rem;
+}
+
+.new-item-modal button {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  background: var(--card);
+  color: var(--text);
+  padding: 0.4rem 0.85rem;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.new-item-modal button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.new-item-modal-error {
+  margin-top: 0.6rem;
+  color: var(--danger);
+  font-size: 0.85rem;
+  display: none;
+}
+
+/* OpenSpec section on the issue detail page */
+.spec-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.spec-rendered {
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--card-muted);
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  max-height: 28rem;
+  overflow: auto;
+}
+
+.spec-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.spec-editor textarea {
+  width: 100%;
+  min-height: 22rem;
+  font-family: var(--font-mono);
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--card-muted);
+  color: var(--text);
+  resize: vertical;
+}
+
+.spec-editor-actions {
+  display: flex;
+  gap: 0.55rem;
 }

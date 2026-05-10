@@ -147,8 +147,16 @@ func (o *Orchestrator) runTurnLoop(
 
 		log.Info("running turn", "turn", turn)
 
+		prEmitter := agent.NewPRLinkEmitter(func(ev agent.Event) {
+			if pl, ok := ev.Payload.(agent.PRLinkPayload); ok {
+				o.recordPRLink(issue, pl)
+			}
+		})
 		cb := func(ev agent.Event) {
 			log.Debug("agent event", "kind", string(ev.Kind))
+			if ev.Kind == agent.EventAssistantMessage || ev.Kind == agent.EventToolCall || ev.Kind == agent.EventToolResult || ev.Kind == agent.EventOtherMessage {
+				prEmitter.Scan(sess.ID, fmt.Sprintf("%v", ev.Payload))
+			}
 		}
 
 		result, turnErr := o.runtime.RunTurn(ctx, sess, p, issue, cb)
@@ -256,7 +264,7 @@ func (o *Orchestrator) runBetweenTurnsHook(
 }
 
 // recordTurnComplete folds turn-level token usage and turn count into the
-// running entry and the global codex_totals so the observability snapshot
+// running entry and the global agent_totals so the observability snapshot
 // reflects post-turn state. Mirrors Elixir's apply_codex_token_delta /
 // integrate_codex_update path that runs before notify_dashboard().
 func (o *Orchestrator) recordTurnComplete(issueID string, turn int, result agent.TurnResult) {
@@ -275,9 +283,9 @@ func (o *Orchestrator) recordTurnComplete(issueID string, turn int, result agent
 	entry.tokens.OutputTokens += result.Tokens.OutputTokens
 	entry.tokens.TotalTokens += result.Tokens.TotalTokens
 
-	o.codexTotals.InputTokens += result.Tokens.InputTokens
-	o.codexTotals.OutputTokens += result.Tokens.OutputTokens
-	o.codexTotals.TotalTokens += result.Tokens.TotalTokens
+	o.agentTotals.InputTokens += result.Tokens.InputTokens
+	o.agentTotals.OutputTokens += result.Tokens.OutputTokens
+	o.agentTotals.TotalTokens += result.Tokens.TotalTokens
 }
 
 // truncateOutput truncates output to at most maxBytes. If truncated, appends a

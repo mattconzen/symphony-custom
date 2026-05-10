@@ -92,7 +92,7 @@ type issueAttempts struct {
 }
 
 type issueLogs struct {
-	CodexSessionLogs []any `json:"codex_session_logs"`
+	AgentSessionLogs []any `json:"agent_session_logs"`
 }
 
 type issueRecentEvent struct {
@@ -167,7 +167,7 @@ func buildIssuePayload(snap observability.Snapshot, id string, workspaceRoot str
 		Status:          issueStatus(running, retry),
 		Workspace:       buildWorkspace(id, running, retry, workspaceRoot),
 		Attempts:        buildAttempts(retry),
-		Logs:            issueLogs{CodexSessionLogs: []any{}},
+		Logs:            issueLogs{AgentSessionLogs: []any{}},
 		RecentEvents:    buildRecentEvents(running),
 		Tracked:         map[string]any{},
 	}

@@ -187,6 +187,15 @@ func (e *errorTracker) CreateComment(ctx context.Context, issueID, body string) 
 func (e *errorTracker) UpdateIssueState(ctx context.Context, issueID, state string) error {
 	return e.inner.UpdateIssueState(ctx, issueID, state)
 }
+func (e *errorTracker) CreateIssue(ctx context.Context, draft domain.IssueDraft) (domain.Issue, error) {
+	return e.inner.CreateIssue(ctx, draft)
+}
+func (e *errorTracker) HasSpec(ctx context.Context, identifier string) (bool, error) {
+	return e.inner.HasSpec(ctx, identifier)
+}
+func (e *errorTracker) FetchAllIssues(ctx context.Context) ([]domain.Issue, error) {
+	return e.inner.FetchAllIssues(ctx)
+}
 
 // TestStartupCleanup_BestEffortOnTrackerError verifies that if FetchIssuesByStates
 // returns an error, the orchestrator logs and continues without crashing.

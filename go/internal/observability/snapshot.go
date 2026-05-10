@@ -1,19 +1,47 @@
 package observability
 
-import "time"
+import (
+	"time"
+
+	"github.com/openai/symphony/go/internal/domain"
+)
 
 // Snapshot is the read-only projection of orchestrator state consumed by the
-// observability web dashboard and JSON API. Field names mirror the Elixir
-// SymphonyElixirWeb.Presenter.state_payload/2 output exactly so the API
-// contract is stable across runtimes.
+// observability web dashboard and JSON API.
+//
+// **Divergence from Elixir:** the Go dashboard renames `codex_totals` to
+// `agent_totals` (and `codex_session_logs` to `agent_session_logs`) so the
+// surface is provider-agnostic. The Elixir reference implementation under
+// `elixir/` retains the `codex_*` keys; consumers that need to support both
+// runtimes must translate.
 type Snapshot struct {
 	GeneratedAt time.Time      `json:"generated_at"`
 	Counts      Counts         `json:"counts"`
-	CodexTotals TokenTotals    `json:"codex_totals"`
+	AgentTotals TokenTotals    `json:"agent_totals"`
 	RateLimits  any            `json:"rate_limits"`
 	Running     []RunningEntry `json:"running"`
 	Retrying    []RetryEntry   `json:"retrying"`
 	Polling     Polling        `json:"polling"`
+	Kanban      []KanbanColumn `json:"kanban"`
+}
+
+// KanbanColumn is one column of the Kanban view. Cards are sorted by
+// identifier within a column so the order is deterministic across
+// snapshots.
+type KanbanColumn struct {
+	Key   string       `json:"key"`
+	Title string       `json:"title"`
+	Cards []KanbanCard `json:"cards"`
+}
+
+// KanbanCard is one card in a Kanban column.
+type KanbanCard struct {
+	IssueID         string             `json:"issue_id"`
+	IssueIdentifier string             `json:"issue_identifier"`
+	Title           string             `json:"title"`
+	State           string             `json:"state"`
+	URL             string             `json:"url"`
+	PR              *domain.PullRequest `json:"pr,omitempty"`
 }
 
 // Polling mirrors Elixir Presenter's `polling` map: a snapshot of the
@@ -75,4 +103,111 @@ type RetryEntry struct {
 	Error           *string    `json:"error"`
 	WorkerHost      *string    `json:"worker_host"`
 	WorkspacePath   *string    `json:"workspace_path"`
+}
+
+// KanbanInputs is the data BuildKanban needs to derive the column layout.
+// runningIDs / retryingIDs are sets of issue identifiers currently in
+// orchestrator state. specByID maps identifier → HasSpec result. prByID
+// maps identifier → known PullRequest (nil/absent for issues with no PR).
+// terminalStates is the configured tracker terminal-states list (lower-cased
+// internally).
+type KanbanInputs struct {
+	AllIssues      []domain.Issue
+	RunningIDs     map[string]struct{}
+	RetryingIDs    map[string]struct{}
+	SpecByID       map[string]bool
+	PRByID         map[string]domain.PullRequest
+	TerminalStates []string
+}
+
+// BuildKanban partitions issues into the five columns: Backlog (no spec),
+// Ready (has spec), In Progress (running or retrying), In Review (PR
+// open), Done (PR merged OR tracker state is terminal).
+func BuildKanban(in KanbanInputs) []KanbanColumn {
+	terminalSet := make(map[string]bool, len(in.TerminalStates))
+	for _, s := range in.TerminalStates {
+		terminalSet[lower(s)] = true
+	}
+
+	columns := []KanbanColumn{
+		{Key: "backlog", Title: "Backlog"},
+		{Key: "ready", Title: "Ready"},
+		{Key: "in_progress", Title: "In Progress"},
+		{Key: "in_review", Title: "In Review"},
+		{Key: "done", Title: "Done"},
+	}
+	idx := map[string]int{
+		"backlog": 0, "ready": 1, "in_progress": 2, "in_review": 3, "done": 4,
+	}
+
+	for _, issue := range in.AllIssues {
+		card := KanbanCard{
+			IssueID:         issue.ID,
+			IssueIdentifier: issue.Identifier,
+			Title:           issue.Title,
+			State:           issue.State,
+			URL:             issue.URL,
+		}
+		if pr, ok := in.PRByID[issue.Identifier]; ok {
+			pcopy := pr
+			card.PR = &pcopy
+		}
+
+		key := classifyKanban(issue, card.PR, in, terminalSet)
+		columns[idx[key]].Cards = append(columns[idx[key]].Cards, card)
+	}
+
+	for i := range columns {
+		cards := columns[i].Cards
+		// stable order: identifier ascending
+		sortByIdentifier(cards)
+		columns[i].Cards = cards
+	}
+	return columns
+}
+
+func classifyKanban(issue domain.Issue, pr *domain.PullRequest, in KanbanInputs, terminalSet map[string]bool) string {
+	// Done first: a merged PR or terminal state both land in Done.
+	if pr != nil && pr.State == "merged" {
+		return "done"
+	}
+	if terminalSet[lower(issue.State)] {
+		return "done"
+	}
+	// In Review: an open PR.
+	if pr != nil && pr.State == "open" {
+		return "in_review"
+	}
+	// In Progress: running or retrying inside the orchestrator.
+	if _, ok := in.RunningIDs[issue.Identifier]; ok {
+		return "in_progress"
+	}
+	if _, ok := in.RetryingIDs[issue.Identifier]; ok {
+		return "in_progress"
+	}
+	// Ready vs Backlog by spec presence.
+	if in.SpecByID[issue.Identifier] {
+		return "ready"
+	}
+	return "backlog"
+}
+
+func lower(s string) string {
+	out := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		out[i] = c
+	}
+	return string(out)
+}
+
+func sortByIdentifier(cards []KanbanCard) {
+	for i := 1; i < len(cards); i++ {
+		for j := i; j > 0 && cards[j-1].IssueIdentifier > cards[j].IssueIdentifier; j-- {
+			cards[j-1], cards[j] = cards[j], cards[j-1]
+		}
+	}
 }

@@ -21,6 +21,7 @@ var fragmentTemplates = []struct {
 	targetID  string
 }{
 	{"header-status", "header-status"},
+	{"kanban", "kanban"},
 	{"metric-grid", "metric-grid"},
 	{"rate-limits", "rate-limits"},
 	{"running-sessions", "running-sessions"},

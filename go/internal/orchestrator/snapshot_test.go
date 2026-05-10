@@ -45,7 +45,7 @@ func TestBuildSnapshot_GoldenJSON(t *testing.T) {
 	cfg := config.Config{}
 	o := New(cfg, nil, nil, nil, observability.New(&bytes.Buffer{}))
 
-	o.codexTotals = observability.TokenTotals{
+	o.agentTotals = observability.TokenTotals{
 		TotalTokens:    1500,
 		InputTokens:    900,
 		OutputTokens:   600,

@@ -34,7 +34,7 @@ func fixedSnapshot(t *testing.T) observability.Snapshot {
 	return observability.Snapshot{
 		GeneratedAt: mustParseRFC3339(t, "2026-05-09T12:00:00Z"),
 		Counts:      observability.Counts{Running: 2, Retrying: 1},
-		CodexTotals: observability.TokenTotals{
+		AgentTotals: observability.TokenTotals{
 			TotalTokens:    1500,
 			InputTokens:    900,
 			OutputTokens:   600,
@@ -100,6 +100,13 @@ func fixedSnapshot(t *testing.T) observability.Snapshot {
 			Checking:       false,
 			PollIntervalMs: 2000,
 			NextPollInMs:   1500,
+		},
+		Kanban: []observability.KanbanColumn{
+			{Key: "backlog", Title: "Backlog"},
+			{Key: "ready", Title: "Ready"},
+			{Key: "in_progress", Title: "In Progress"},
+			{Key: "in_review", Title: "In Review"},
+			{Key: "done", Title: "Done"},
 		},
 	}
 }

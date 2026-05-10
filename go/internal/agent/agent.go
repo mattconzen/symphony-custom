@@ -89,7 +89,18 @@ const (
 	EventNotification     EventKind = "notification"
 	EventOtherMessage     EventKind = "other_message"
 	EventMalformed        EventKind = "malformed"
+	EventPRLink           EventKind = "pr_link"
 )
+
+// PRLinkPayload is the payload for EventPRLink events. URL is the canonical
+// https://github.com/<owner>/<repo>/pull/<n> form; Owner/Repo/Number are the
+// parsed components.
+type PRLinkPayload struct {
+	URL    string
+	Owner  string
+	Repo   string
+	Number int
+}
 
 // Event is an agent runtime event emitted during a turn.
 type Event struct {

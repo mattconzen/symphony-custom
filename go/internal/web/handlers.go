@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -10,18 +11,20 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/openai/symphony/go/internal/domain"
 	"github.com/openai/symphony/go/internal/observability"
 	"github.com/openai/symphony/go/internal/orchestrator"
 )
 
 // dashboardView is the render context for dashboard.html.tmpl. It embeds the
 // snapshot (so the template's {{ .Counts }}, {{ .Running }}, etc. resolve
-// directly) and adds the Error sentinel the template's `{{ if .Error }}`
-// branch expects. Error is always nil on the happy path.
+// directly) and adds extra fields the template needs.
 type dashboardView struct {
 	observability.Snapshot
-	Error *dashboardError
+	Error          *dashboardError
+	CanCreateIssue bool
 }
 
 type dashboardError struct {
@@ -38,13 +41,27 @@ type snapshotSource interface {
 	RequestRefresh() bool
 }
 
+// trackerSource is the subset of tracker.Tracker that the write handlers
+// (POST /api/v1/issues, PUT /api/v1/issues/{id}/spec, etc.) need. It is
+// extracted so tests can supply lightweight fakes.
+type trackerSource interface {
+	CreateIssue(ctx context.Context, draft domain.IssueDraft) (domain.Issue, error)
+	HasSpec(ctx context.Context, identifier string) (bool, error)
+}
+
 // Handler bundles the dashboard's HTTP surface area. Construct it via
 // NewHandler and mount the returned http.Handler on an http.Server.
 type Handler struct {
 	orch      snapshotSource
+	trk       trackerSource
+	specGen   SpecGenerator
 	tmpl      *template.Template
 	mux       *http.ServeMux
 	broadcast *broadcaster
+
+	// specJobs tracks in-flight or completed spec-generation jobs.
+	specJobsMu sync.Mutex
+	specJobs   map[string]*specJob
 }
 
 // NewHandler returns the dashboard's http.Handler. The orchestrator is the
@@ -61,12 +78,21 @@ type Handler struct {
 // theirs around the broadcaster (or call WithUpdateCallback after
 // NewHandler returns, which will silently disable WS streaming).
 func NewHandler(orch *orchestrator.Orchestrator) http.Handler {
-	h := newHandlerFromSource(orch)
+	h := newHandlerFromSource(orch, nil, nil)
 	orch.WithUpdateCallback(h.broadcast.broadcast)
 	return h
 }
 
-func newHandlerFromSource(orch snapshotSource) *Handler {
+// NewHandlerWithDeps is the full constructor used by main.go. trk and
+// specGen are optional; when nil, the corresponding write endpoints
+// respond with 405 unsupported.
+func NewHandlerWithDeps(orch *orchestrator.Orchestrator, trk trackerSource, specGen SpecGenerator) http.Handler {
+	h := newHandlerFromSource(orch, trk, specGen)
+	orch.WithUpdateCallback(h.broadcast.broadcast)
+	return h
+}
+
+func newHandlerFromSource(orch snapshotSource, trk trackerSource, specGen SpecGenerator) *Handler {
 	tmpl := template.Must(
 		template.New("dashboard").
 			Funcs(Funcs()).
@@ -75,9 +101,12 @@ func newHandlerFromSource(orch snapshotSource) *Handler {
 
 	h := &Handler{
 		orch:      orch,
+		trk:       trk,
+		specGen:   specGen,
 		tmpl:      tmpl,
 		mux:       http.NewServeMux(),
 		broadcast: newBroadcaster(),
+		specJobs:  make(map[string]*specJob),
 	}
 	h.routes()
 	return h
@@ -107,6 +136,19 @@ func (h *Handler) routes() {
 	}))
 	h.mux.HandleFunc("/api/v1/{issue_identifier}", h.dispatchByMethod(map[string]http.HandlerFunc{
 		http.MethodGet: h.handleAPIIssue,
+	}))
+	h.mux.HandleFunc("/api/v1/issues", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodPost: h.handleAPICreateIssue,
+	}))
+	h.mux.HandleFunc("/api/v1/issues/{issue_identifier}/spec", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodGet: h.handleAPIReadSpec,
+		http.MethodPut: h.handleAPIWriteSpec,
+	}))
+	h.mux.HandleFunc("/api/v1/issues/{issue_identifier}/spec/generate", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodPost: h.handleAPIGenerateSpec,
+	}))
+	h.mux.HandleFunc("/api/v1/issues/{issue_identifier}/spec/generate/{job_id}", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodGet: h.handleAPIGenerateSpecStatus,
 	}))
 }
 
@@ -138,7 +180,10 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	view := dashboardView{Snapshot: h.orch.Snapshot()}
+	view := dashboardView{
+		Snapshot:       h.orch.Snapshot(),
+		CanCreateIssue: h.canCreate(),
+	}
 
 	var buf bytes.Buffer
 	if err := h.tmpl.ExecuteTemplate(&buf, "dashboard.html.tmpl", view); err != nil {
@@ -185,14 +230,14 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# TYPE symphony_retrying_sessions gauge")
 	fmt.Fprintf(w, "symphony_retrying_sessions %d\n", snap.Counts.Retrying)
 
-	fmt.Fprintln(w, "# HELP symphony_codex_tokens_total Total Codex tokens consumed by completed and active sessions.")
-	fmt.Fprintln(w, "# TYPE symphony_codex_tokens_total counter")
-	fmt.Fprintf(w, "symphony_codex_tokens_total{type=\"input\"} %d\n", snap.CodexTotals.InputTokens)
-	fmt.Fprintf(w, "symphony_codex_tokens_total{type=\"output\"} %d\n", snap.CodexTotals.OutputTokens)
+	fmt.Fprintln(w, "# HELP symphony_agent_tokens_total Total agent tokens consumed by completed and active sessions.")
+	fmt.Fprintln(w, "# TYPE symphony_agent_tokens_total counter")
+	fmt.Fprintf(w, "symphony_agent_tokens_total{type=\"input\"} %d\n", snap.AgentTotals.InputTokens)
+	fmt.Fprintf(w, "symphony_agent_tokens_total{type=\"output\"} %d\n", snap.AgentTotals.OutputTokens)
 
-	fmt.Fprintln(w, "# HELP symphony_codex_seconds_running Total Codex runtime seconds across completed and active sessions.")
-	fmt.Fprintln(w, "# TYPE symphony_codex_seconds_running counter")
-	fmt.Fprintf(w, "symphony_codex_seconds_running %d\n", snap.CodexTotals.SecondsRunning)
+	fmt.Fprintln(w, "# HELP symphony_agent_seconds_running Total agent runtime seconds across completed and active sessions.")
+	fmt.Fprintln(w, "# TYPE symphony_agent_seconds_running counter")
+	fmt.Fprintf(w, "symphony_agent_seconds_running %d\n", snap.AgentTotals.SecondsRunning)
 
 	fmt.Fprintln(w, "# HELP symphony_polling_checking 1 when the orchestrator is currently checking for work, 0 otherwise.")
 	fmt.Fprintln(w, "# TYPE symphony_polling_checking gauge")

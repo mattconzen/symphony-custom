@@ -108,7 +108,7 @@ func totalRuntimeSeconds(snap any) int64 {
 	if snap == nil {
 		return 0
 	}
-	completed, _ := toInt64(fieldByPath(snap, "CodexTotals", "SecondsRunning"))
+	completed, _ := toInt64(fieldByPath(snap, "AgentTotals", "SecondsRunning"))
 	now := time.Now().UTC()
 	total := completed
 	for _, entry := range fieldSlice(snap, "Running") {

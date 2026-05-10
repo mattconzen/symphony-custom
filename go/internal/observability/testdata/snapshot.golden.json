@@ -4,7 +4,7 @@
     "running": 2,
     "retrying": 1
   },
-  "codex_totals": {
+  "agent_totals": {
     "total_tokens": 1500,
     "input_tokens": 900,
     "output_tokens": 600,
@@ -70,5 +70,32 @@
     "checking": false,
     "poll_interval_ms": 2000,
     "next_poll_in_ms": 1500
-  }
+  },
+  "kanban": [
+    {
+      "key": "backlog",
+      "title": "Backlog",
+      "cards": null
+    },
+    {
+      "key": "ready",
+      "title": "Ready",
+      "cards": null
+    },
+    {
+      "key": "in_progress",
+      "title": "In Progress",
+      "cards": null
+    },
+    {
+      "key": "in_review",
+      "title": "In Review",
+      "cards": null
+    },
+    {
+      "key": "done",
+      "title": "Done",
+      "cards": null
+    }
+  ]
 }

@@ -4,9 +4,11 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/openai/symphony/go/internal/domain"
 )
@@ -32,6 +34,14 @@ type MemoryTracker struct {
 	// ActiveStates is used to filter candidate issues; defaults to common active states.
 	ActiveStates   []string
 	TerminalStates []string
+
+	// nextID is the monotonic counter used to mint MEM-N identifiers when
+	// CreateIssue is called without an explicit identifier.
+	nextID int
+
+	// specs is an in-process map of identifier -> OpenSpec body. Used by
+	// SpecReader / SpecWriter; lost on restart by design.
+	specs map[string]string
 }
 
 // New creates a new MemoryTracker seeded with the given issues.
@@ -42,6 +52,7 @@ func New(seed []domain.Issue) *MemoryTracker {
 		issues:         issues,
 		ActiveStates:   []string{"todo", "in progress"},
 		TerminalStates: []string{"done", "closed", "cancelled", "canceled", "duplicate"},
+		specs:          make(map[string]string),
 	}
 }
 
@@ -151,4 +162,92 @@ func (t *MemoryTracker) GetIssue(id string) (domain.Issue, bool) {
 		}
 	}
 	return domain.Issue{}, false
+}
+
+// CreateIssue appends a new issue with an auto-generated MEM-N identifier.
+func (t *MemoryTracker) CreateIssue(_ context.Context, draft domain.IssueDraft) (domain.Issue, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.nextID++
+	id := fmt.Sprintf("MEM-%d", t.nextID)
+	now := time.Now().UTC()
+	state := "Todo"
+	if len(t.ActiveStates) > 0 {
+		state = t.ActiveStates[0]
+	}
+	issue := domain.Issue{
+		ID:          id,
+		Identifier:  id,
+		Title:       strings.TrimSpace(draft.Title),
+		Description: draft.Description,
+		State:       state,
+		Labels:      draft.Labels,
+		CreatedAt:   &now,
+		UpdatedAt:   &now,
+	}
+	t.issues = append(t.issues, issue)
+	return issue, nil
+}
+
+// HasSpec returns whether a spec body has been written via WriteSpec.
+func (t *MemoryTracker) HasSpec(_ context.Context, identifier string) (bool, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	_, ok := t.specs[identifier]
+	return ok, nil
+}
+
+// FetchAllIssues returns a copy of every tracked issue.
+func (t *MemoryTracker) FetchAllIssues(_ context.Context) ([]domain.Issue, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]domain.Issue, len(t.issues))
+	copy(out, t.issues)
+	return out, nil
+}
+
+// SetPullRequest sets the PR field on the issue with the given identifier.
+func (t *MemoryTracker) SetPullRequest(_ context.Context, identifier string, pr domain.PullRequest) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.issues {
+		if t.issues[i].Identifier == identifier {
+			cp := pr
+			t.issues[i].PR = &cp
+			return nil
+		}
+	}
+	return fmt.Errorf("issue %q not found", identifier)
+}
+
+// ReadSpec returns the spec body previously written via WriteSpec.
+func (t *MemoryTracker) ReadSpec(_ context.Context, identifier string) (string, string, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	body, ok := t.specs[identifier]
+	if !ok {
+		return "", "", domain.ErrSpecNotFound
+	}
+	return body, etagFor(body), nil
+}
+
+// WriteSpec stores the spec body for the given identifier. ifMatchEtag is
+// honored when non-empty: a mismatch returns domain.ErrSpecConflict.
+func (t *MemoryTracker) WriteSpec(_ context.Context, identifier, body, ifMatchEtag string) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if ifMatchEtag != "" {
+		current, ok := t.specs[identifier]
+		if ok && etagFor(current) != ifMatchEtag {
+			return "", domain.ErrSpecConflict
+		}
+	}
+	t.specs[identifier] = body
+	return etagFor(body), nil
+}
+
+// etagFor returns a short content-derived etag.
+func etagFor(body string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(body)))[:16]
 }

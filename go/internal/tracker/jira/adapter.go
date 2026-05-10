@@ -138,6 +138,26 @@ func (a *Adapter) UpdateIssueState(ctx context.Context, issueKey, stateName stri
 	return nil
 }
 
+// CreateIssue is not supported for JIRA in this implementation.
+func (a *Adapter) CreateIssue(_ context.Context, _ domain.IssueDraft) (domain.Issue, error) {
+	return domain.Issue{}, domain.ErrCreateUnsupported
+}
+
+// HasSpec returns false; JIRA has no OpenSpec concept.
+func (a *Adapter) HasSpec(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+
+// FetchAllIssues returns issues in the union of active and terminal states.
+func (a *Adapter) FetchAllIssues(ctx context.Context) ([]domain.Issue, error) {
+	combined := append([]string{}, a.cfg.Tracker.ActiveStates...)
+	combined = append(combined, a.cfg.Tracker.TerminalStates...)
+	if len(combined) == 0 {
+		return nil, nil
+	}
+	return a.FetchIssuesByStates(ctx, combined)
+}
+
 // ---- internal helpers ----
 
 // buildStateJQL constructs a JQL string filtering by project and status list.

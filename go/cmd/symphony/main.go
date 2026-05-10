@@ -25,6 +25,7 @@ import (
 	"github.com/openai/symphony/go/internal/agent"
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
+	gh "github.com/openai/symphony/go/internal/github"
 	"github.com/openai/symphony/go/internal/observability"
 	"github.com/openai/symphony/go/internal/orchestrator"
 	"github.com/openai/symphony/go/internal/tracker"
@@ -98,6 +99,18 @@ func main() {
 	orch := orchestrator.New(cfg, t, rt, ws, log).
 		WithPromptTemplate(wf.PromptTemplate)
 
+	// 7a. Optional GitHub PR reconciler. Disabled when github.owner/repo are
+	// unset.
+	if cfg.GitHub.Owner != "" && cfg.GitHub.Repo != "" {
+		ghClient := gh.New(cfg.GitHub.Token)
+		orch.WithPRReconciler(ghClient, cfg.GitHub.PRPollInterval)
+		log.Info("github pr reconciler enabled",
+			"owner", cfg.GitHub.Owner,
+			"repo", cfg.GitHub.Repo,
+			"interval", cfg.GitHub.PRPollInterval.String(),
+		)
+	}
+
 	// 8. Set up signal handling.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -120,9 +133,10 @@ func main() {
 	)
 	if port > 0 {
 		addr := net.JoinHostPort(listen, strconv.Itoa(port))
+		specGen := web.NewRuntimeSpecGenerator(rt, cfg, ws, log)
 		server = &http.Server{
 			Addr:              addr,
-			Handler:           web.NewHandler(orch),
+			Handler:           web.NewHandlerWithDeps(orch, t, specGen),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		log.Info("web dashboard available at http://" + addr + "/")
