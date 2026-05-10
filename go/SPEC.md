@@ -2013,6 +2013,14 @@ because there is no asynchronous boundary that could surface them.
   (server shutdown), or a frame write fails. The server MUST NOT keep dead subscribers
   registered.
 
+The dashboard renders a small `#ws-status` pill driven by the htmx-ws extension's lifecycle
+events. The pill MUST live outside the `#header-status` OOB-swap container so it is not
+clobbered by fragment pushes. Visible states are: `live` ("Live", green) on `htmx:wsOpen`,
+`connecting` ("Connecting…", grey) on `htmx:wsConnecting`, `disconnected` ("Reconnecting…",
+amber, pulsing) on `htmx:wsClose`, and `error` ("Connection error", red) on `htmx:wsError`.
+Reconnect itself is provided by the htmx-ws extension's exponential backoff; the dashboard
+only surfaces the events.
+
 ### 14.5 Error format
 
 For any `/api/v1/*` 4xx or 5xx response, the body MUST be the JSON envelope:

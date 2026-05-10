@@ -63,6 +63,38 @@ func TestHandleDashboard_RendersOK(t *testing.T) {
 	}
 }
 
+func TestDashboard_WSStatusPill(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(observability.Snapshot{})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	for _, marker := range []string{
+		`id="ws-status"`,
+		`class="ws-status ws-status-live"`,
+		`htmx:wsOpen`,
+		`htmx:wsClose`,
+		`htmx:wsError`,
+		`htmx:wsConnecting`,
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Errorf("body missing %q", marker)
+		}
+	}
+}
+
 func TestHandleDashboard_NonRootGETIs404(t *testing.T) {
 	t.Parallel()
 

@@ -1,13 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Symphony Observability</title>
-    <link rel="stylesheet" href="/static/dashboard.css" />
-    <script src="/static/htmx.min.js"></script>
-    <script src="/static/htmx-ws.min.js"></script>
-  </head>
+  {{ template "head" . }}
   <body hx-ext="ws" ws-connect="/ws">
     <main class="app-shell">
       <section class="dashboard-shell">
@@ -21,8 +14,14 @@
               </p>
             </div>
 
-            <div id="header-status" class="status-stack">
-              {{ template "header-status" . }}
+            <div class="status-stack">
+              <span id="ws-status" class="ws-status ws-status-live" data-state="live">
+                <span class="ws-status-dot"></span>
+                <span class="ws-status-label">Live</span>
+              </span>
+              <div id="header-status" class="header-status">
+                {{ template "header-status" . }}
+              </div>
             </div>
           </div>
         </header>
@@ -53,6 +52,29 @@
         {{ end }}
       </section>
     </main>
+    <script>
+      (function () {
+        var pill = document.getElementById("ws-status");
+        if (!pill) return;
+        var label = pill.querySelector(".ws-status-label");
+        var states = {
+          "htmx:wsOpen":       { state: "live",         label: "Live" },
+          "htmx:wsConnecting": { state: "connecting",   label: "Connecting…" },
+          "htmx:wsClose":      { state: "disconnected", label: "Reconnecting…" },
+          "htmx:wsError":      { state: "error",        label: "Connection error" }
+        };
+        function apply(name) {
+          var s = states[name];
+          if (!s) return;
+          pill.setAttribute("data-state", s.state);
+          pill.className = "ws-status ws-status-" + s.state;
+          if (label) label.textContent = s.label;
+        }
+        Object.keys(states).forEach(function (evt) {
+          document.body.addEventListener(evt, function () { apply(evt); });
+        });
+      })();
+    </script>
   </body>
 </html>
 
