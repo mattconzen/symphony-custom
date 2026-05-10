@@ -28,11 +28,11 @@ func (f *fakeSource) RequestRefresh() bool {
 }
 
 func newTestHandler(snap observability.Snapshot) *Handler {
-	return newHandlerFromSource(&fakeSource{snap: snap, refreshQueued: true})
+	return newHandlerFromSource(&fakeSource{snap: snap, refreshQueued: true}, nil, nil)
 }
 
 func newTestHandlerWithRoot(snap observability.Snapshot, root string) *Handler {
-	return newHandlerFromSource(&fakeSource{snap: snap, workspaceRoot: root, refreshQueued: true})
+	return newHandlerFromSource(&fakeSource{snap: snap, workspaceRoot: root, refreshQueued: true}, nil, nil)
 }
 
 func TestHandleDashboard_RendersOK(t *testing.T) {
@@ -95,7 +95,7 @@ func TestDashboard_WSStatusPill(t *testing.T) {
 
 	for _, marker := range []string{
 		`id="ws-status"`,
-		`class="ws-status ws-status-live"`,
+		`class="ws-status ws-status-connecting"`,
 		`htmx:wsOpen`,
 		`htmx:wsClose`,
 		`htmx:wsError`,
@@ -381,7 +381,7 @@ func TestMetrics_Format(t *testing.T) {
 
 	snap := observability.Snapshot{
 		Counts:      observability.Counts{Running: 3, Retrying: 2},
-		CodexTotals: observability.TokenTotals{InputTokens: 1000, OutputTokens: 500, SecondsRunning: 90},
+		AgentTotals: observability.TokenTotals{InputTokens: 1000, OutputTokens: 500, SecondsRunning: 90},
 		Polling:     observability.Polling{Checking: true, PollIntervalMs: 2000},
 	}
 	h := newTestHandler(snap)
@@ -413,13 +413,13 @@ func TestMetrics_Format(t *testing.T) {
 		"# HELP symphony_retrying_sessions",
 		"# TYPE symphony_retrying_sessions gauge",
 		"symphony_retrying_sessions 2",
-		"# HELP symphony_codex_tokens_total",
-		"# TYPE symphony_codex_tokens_total counter",
-		`symphony_codex_tokens_total{type="input"} 1000`,
-		`symphony_codex_tokens_total{type="output"} 500`,
-		"# HELP symphony_codex_seconds_running",
-		"# TYPE symphony_codex_seconds_running counter",
-		"symphony_codex_seconds_running 90",
+		"# HELP symphony_agent_tokens_total",
+		"# TYPE symphony_agent_tokens_total counter",
+		`symphony_agent_tokens_total{type="input"} 1000`,
+		`symphony_agent_tokens_total{type="output"} 500`,
+		"# HELP symphony_agent_seconds_running",
+		"# TYPE symphony_agent_seconds_running counter",
+		"symphony_agent_seconds_running 90",
 		"# HELP symphony_polling_checking",
 		"# TYPE symphony_polling_checking gauge",
 		"symphony_polling_checking 1",

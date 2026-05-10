@@ -56,8 +56,20 @@ type Orchestrator struct {
 	running       map[string]*runEntry
 	claimed       map[string]struct{}
 	retryAttempts map[string]*domain.RetryEntry
-	codexTotals   observability.TokenTotals
+	agentTotals   observability.TokenTotals
 	rateLimits    any
+
+	// pullRequests holds the latest known PR state per issue identifier.
+	// Populated from agent-emitted pr_link events and the GitHub PR
+	// reconciler. Persists across dispatch restarts so the Kanban view
+	// retains "In Review"/"Done" partitioning between dispatches.
+	pullRequests map[string]domain.PullRequest
+
+	// kanbanIssues is the cached "all issues" list refreshed by tick();
+	// kanbanSpecs maps identifier → HasSpec for the same set. Both feed
+	// the Kanban projection in Snapshot().
+	kanbanIssues []domain.Issue
+	kanbanSpecs  map[string]bool
 
 	// pollChecking is true while a tracker fetch is in flight inside tick.
 	// Surfaced via Snapshot.Polling.Checking. Guarded by mu.
@@ -77,6 +89,19 @@ type Orchestrator struct {
 	// StatusDashboard.notify_update / ObservabilityPubSub.broadcast_update
 	// fan-out so the web dashboard can react without polling.
 	onUpdate func()
+
+	// prFetcher is the optional GitHub client used by the PR reconciler.
+	// nil disables the reconciler.
+	prFetcher  prFetcher
+	prInterval time.Duration
+}
+
+// WithPRReconciler enables the GitHub PR reconciler. interval=0 disables it
+// (matching nil fetcher).
+func (o *Orchestrator) WithPRReconciler(fetcher prFetcher, interval time.Duration) *Orchestrator {
+	o.prFetcher = fetcher
+	o.prInterval = interval
+	return o
 }
 
 // New returns an Orchestrator wired with the provided dependencies.
@@ -96,8 +121,52 @@ func New(
 		running:       make(map[string]*runEntry),
 		claimed:       make(map[string]struct{}),
 		retryAttempts: make(map[string]*domain.RetryEntry),
+		pullRequests:  make(map[string]domain.PullRequest),
 		refreshC:      make(chan struct{}, 1),
 	}
+}
+
+// PullRequests returns a copy of the orchestrator's known PR map keyed by
+// issue identifier. Used by the Kanban derivation and the GitHub
+// reconciler.
+func (o *Orchestrator) PullRequests() map[string]domain.PullRequest {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make(map[string]domain.PullRequest, len(o.pullRequests))
+	for k, v := range o.pullRequests {
+		out[k] = v
+	}
+	return out
+}
+
+// SetPullRequest records or updates the PR for the given issue identifier
+// and notifies dashboard subscribers. Call from the GitHub reconciler.
+func (o *Orchestrator) SetPullRequest(ctx context.Context, identifier string, pr domain.PullRequest) {
+	o.mu.Lock()
+	o.pullRequests[identifier] = pr
+	o.mu.Unlock()
+	if setter, ok := o.tracker.(interface {
+		SetPullRequest(ctx context.Context, identifier string, pr domain.PullRequest) error
+	}); ok {
+		_ = setter.SetPullRequest(ctx, identifier, pr) //nolint:errcheck
+	}
+	o.notify()
+}
+
+// recordPRLink stores a freshly-discovered PR-link event from an agent
+// runtime. The reconciler may later upgrade Source from "agent_event" to
+// "github_poll" with merge state.
+func (o *Orchestrator) recordPRLink(issue domain.Issue, link agent.PRLinkPayload) {
+	pr := domain.PullRequest{
+		URL:       link.URL,
+		Number:    link.Number,
+		Owner:     link.Owner,
+		Repo:      link.Repo,
+		State:     "open",
+		Source:    "agent_event",
+		UpdatedAt: time.Now().UTC(),
+	}
+	o.SetPullRequest(o.rootCtx, issue.Identifier, pr)
 }
 
 // RequestRefresh schedules an immediate poll on the orchestrator. Returns true
@@ -205,6 +274,12 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Perform one-shot startup cleanup before the first poll tick per SPEC §8.6.
 	o.startupCleanup(ctx)
 
+	// Optional GitHub PR reconciler. Disabled when prFetcher is nil (i.e.
+	// when github config block was absent at startup).
+	if o.prFetcher != nil {
+		go o.runPRReconciler(ctx, o.prFetcher, o.prInterval)
+	}
+
 	interval := time.Duration(o.cfg.Polling.IntervalMs) * time.Millisecond
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -252,6 +327,10 @@ func (o *Orchestrator) tick(ctx context.Context) {
 
 	// 2. Reconcile running issues.
 	o.reconcile(ctx)
+
+	// 2a. Refresh the Kanban cache so the dashboard shows fresh
+	// Backlog/Ready/Done columns. Best-effort; failures logged in helper.
+	o.refreshKanbanCache(ctx)
 
 	// 3. Fetch candidates.
 	candidates, err := o.tracker.FetchCandidateIssues(ctx)
@@ -355,7 +434,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 }
 
 // releaseClaim removes the claim and running entry for the given issue ID and
-// rolls the entry's runtime seconds into the global codex_totals so the
+// rolls the entry's runtime seconds into the global agent_totals so the
 // dashboard's cumulative runtime keeps growing across completed sessions
 // (parity with Elixir record_session_completion_totals).
 func (o *Orchestrator) releaseClaim(issueID string) {
@@ -363,7 +442,7 @@ func (o *Orchestrator) releaseClaim(issueID string) {
 	if entry, ok := o.running[issueID]; ok && !entry.startedAt.IsZero() {
 		secs := int(time.Since(entry.startedAt).Seconds())
 		if secs > 0 {
-			o.codexTotals.SecondsRunning += secs
+			o.agentTotals.SecondsRunning += secs
 		}
 	}
 	delete(o.claimed, issueID)

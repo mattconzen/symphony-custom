@@ -80,6 +80,174 @@ func (a *Adapter) CreateComment(_ context.Context, issueID, body string) error {
 	return atomicWrite(path, updated)
 }
 
+// CreateIssue writes a new <root>/<slug>.md with YAML front matter and the
+// supplied description as the body. Slug is derived from the title.
+func (a *Adapter) CreateIssue(_ context.Context, draft domain.IssueDraft) (domain.Issue, error) {
+	root := a.cfg.Tracker.Markdown.Root
+	if root == "" {
+		return domain.Issue{}, fmt.Errorf("markdown: tracker.markdown.root not configured")
+	}
+	if strings.TrimSpace(draft.Title) == "" {
+		return domain.Issue{}, fmt.Errorf("markdown: title is required")
+	}
+
+	slug := slugify(draft.Title)
+	if slug == "" {
+		slug = fmt.Sprintf("issue-%d", time.Now().UnixNano())
+	}
+	path := filepath.Join(root, slug+".md")
+	if _, err := os.Stat(path); err == nil {
+		// Avoid clobbering an existing file by appending a timestamp suffix.
+		slug = fmt.Sprintf("%s-%d", slug, time.Now().Unix())
+		path = filepath.Join(root, slug+".md")
+	}
+
+	now := time.Now().UTC()
+	state := "Todo"
+	if len(a.cfg.Tracker.ActiveStates) > 0 {
+		state = a.cfg.Tracker.ActiveStates[0]
+	}
+	fm := map[string]any{
+		"state":      state,
+		"created_at": now.Format(time.RFC3339),
+		"updated_at": now.Format(time.RFC3339),
+	}
+	if len(draft.Labels) > 0 {
+		fm["labels"] = draft.Labels
+	}
+
+	body := fmt.Sprintf("# %s\n\n%s\n", draft.Title, strings.TrimRight(draft.Description, "\n"))
+	out, err := Serialize(fm, []byte(body))
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return domain.Issue{}, fmt.Errorf("markdown: mkdir %s: %w", root, err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return domain.Issue{}, fmt.Errorf("markdown: write %s: %w", path, err)
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	return domain.Issue{
+		ID:          fileID(abs),
+		Identifier:  slug,
+		Title:       draft.Title,
+		Description: strings.TrimSpace(body),
+		State:       state,
+		URL:         "file://" + abs,
+		Labels:      draft.Labels,
+		CreatedAt:   &now,
+		UpdatedAt:   &now,
+	}, nil
+}
+
+// HasSpec reports whether the markdown issue has an OpenSpec-style spec.
+// True iff its front-matter has openspec: true OR a sibling <slug>.spec.md
+// exists alongside the issue file.
+func (a *Adapter) HasSpec(_ context.Context, identifier string) (bool, error) {
+	root := a.cfg.Tracker.Markdown.Root
+	mdPath := filepath.Join(root, identifier+".md")
+	specPath := filepath.Join(root, identifier+".spec.md")
+
+	if _, err := os.Stat(specPath); err == nil {
+		return true, nil
+	}
+
+	raw, err := os.ReadFile(mdPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("markdown: read %s: %w", mdPath, err)
+	}
+	fm, _, err := Parse(raw)
+	if err != nil {
+		return false, nil // malformed front-matter -> no spec
+	}
+	if v, ok := fm["openspec"]; ok {
+		if b, ok := v.(bool); ok {
+			return b, nil
+		}
+	}
+	return false, nil
+}
+
+// FetchAllIssues lists every .md file under the markdown root.
+func (a *Adapter) FetchAllIssues(_ context.Context) ([]domain.Issue, error) {
+	var out []domain.Issue
+	err := a.walk(func(issue domain.Issue) error {
+		out = append(out, issue)
+		return nil
+	})
+	return out, err
+}
+
+// ReadSpec returns the body of <root>/<identifier>.spec.md if it exists.
+func (a *Adapter) ReadSpec(_ context.Context, identifier string) (string, string, error) {
+	specPath := filepath.Join(a.cfg.Tracker.Markdown.Root, identifier+".spec.md")
+	raw, err := os.ReadFile(specPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", domain.ErrSpecNotFound
+		}
+		return "", "", fmt.Errorf("markdown: read %s: %w", specPath, err)
+	}
+	body := string(raw)
+	return body, etagFor(body), nil
+}
+
+// WriteSpec writes <root>/<identifier>.spec.md atomically.
+func (a *Adapter) WriteSpec(_ context.Context, identifier, body, ifMatchEtag string) (string, error) {
+	specPath := filepath.Join(a.cfg.Tracker.Markdown.Root, identifier+".spec.md")
+	if ifMatchEtag != "" {
+		raw, err := os.ReadFile(specPath)
+		if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("markdown: read %s: %w", specPath, err)
+		}
+		if err == nil && etagFor(string(raw)) != ifMatchEtag {
+			return "", domain.ErrSpecConflict
+		}
+	}
+	if err := atomicWrite(specPath, []byte(body)); err != nil {
+		return "", err
+	}
+	return etagFor(body), nil
+}
+
+// etagFor returns a short content-derived etag for a spec body.
+func etagFor(body string) string {
+	h := sha256.Sum256([]byte(body))
+	return fmt.Sprintf("%x", h)[:16]
+}
+
+// slugify lowercases the input and replaces non-alphanumerics with dashes.
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 60 {
+		out = out[:60]
+	}
+	return out
+}
+
 // UpdateIssueState rewrites the front-matter state: key atomically per SPEC §11.6.4.
 func (a *Adapter) UpdateIssueState(_ context.Context, issueID, state string) error {
 	path, err := a.findByID(issueID)

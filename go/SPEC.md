@@ -176,6 +176,16 @@ Fields:
     - `state` (string or null)
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
+- `pr` (pull-request ref or null) *(Go runtime extension)*
+  - Populated by agent-emitted `pr_link` events and the GitHub PR reconciler. Fields:
+    - `url` (string)
+    - `number` (integer)
+    - `owner` (string)
+    - `repo` (string)
+    - `state` (string: `"open"` | `"closed"` | `"merged"`)
+    - `merged_at` (timestamp or null)
+    - `source` (string: `"agent_event"` | `"github_poll"`)
+    - `updated_at` (timestamp)
 
 #### 4.1.2 Workflow Definition
 
@@ -1364,6 +1374,47 @@ An implementation MUST support these tracker adapter operations:
    - Behaviour is tracker-kind-specific; see §11.2 (Linear), §11.6 (Markdown), §11.7 (OpenSpec),
      §11.8 (JIRA).
 
+6. `create_issue(draft)` *(Go runtime extension)*
+   - Persist a brand-new issue from the supplied `IssueDraft` (`Title`, `Description`,
+     `Labels`).
+   - Adapters that cannot create issues MUST return `domain.ErrCreateUnsupported`. The
+     dashboard's "+ New work item" button hides itself when the active tracker returns
+     this sentinel.
+   - Per-adapter behaviour:
+     - `memory`: appends a new `domain.Issue` with auto-generated `MEM-N` identifier.
+     - `markdown`: writes `<root>/<slug>.md` with YAML front-matter + body. Slug is
+       derived from the title.
+     - `openspec`: `mkdir <root>/changes/<slug>/` and writes `proposal.md` + `tasks.md`
+       scaffolds. Slug is derived from the title.
+     - `linear`, `jira`: returns `ErrCreateUnsupported`.
+
+7. `has_spec(identifier)` *(Go runtime extension)*
+   - Returns whether the tracker has an OpenSpec-style spec associated with the issue.
+     Used by the Kanban view to partition Backlog vs Ready.
+   - Per-adapter behaviour:
+     - `openspec`: true iff `<root>/changes/<slug>/proposal.md` (or the archive variant)
+       exists.
+     - `markdown`: true iff the issue's front-matter has `openspec: true` OR a sibling
+       `<slug>.spec.md` exists.
+     - `memory`: true iff `WriteSpec` has been called for the identifier in this process.
+     - `linear`, `jira`: always false.
+
+8. `fetch_all_issues()` *(Go runtime extension)*
+   - Returns every issue the tracker knows about, regardless of state. Used by the Kanban
+     derivation. Linear/JIRA implement this as the union of active + terminal states.
+
+#### 11.1.1 Optional capability interfaces
+
+Trackers MAY also satisfy these optional interfaces; handlers detect support via type
+assertion at request time:
+
+- `tracker.SpecReader` / `tracker.SpecWriter` — read/write the OpenSpec body for an
+  identifier. Returns `domain.ErrSpecNotFound` (404) or `domain.ErrSpecConflict` (409 on
+  stale etag) where appropriate.
+- `tracker.PullRequestSetter` — persist a `domain.PullRequest` to the tracker's underlying
+  storage. The orchestrator always keeps an in-memory copy regardless of whether the
+  tracker implements this interface.
+
 ### 11.2 Query Semantics (Linear)
 
 Linear-specific requirements for `tracker.kind == "linear"`:
@@ -1914,7 +1965,19 @@ This section describes the concrete, opt-in HTTP dashboard that the Go reference
 ships in `cmd/symphony` and `internal/web/`. It is a specialization of the OPTIONAL extension
 described in §13.7 — that section sketches the contract any conforming implementation MAY adopt;
 this section pins down the wire shapes that the Go binary MUST emit so external consumers
-(scrapers, Elixir-Symphony parity tooling, browser clients) can rely on a stable surface.
+(scrapers, browser clients) can rely on a stable surface.
+
+> **Divergence from the Elixir reference implementation.** The Go runtime renames every
+> `codex_*` field in the dashboard JSON / Prometheus surface to `agent_*` so the API is
+> provider-agnostic (issue #5):
+>
+> - `snapshot.codex_totals` → `snapshot.agent_totals`
+> - `issue.codex_session_logs` → `issue.agent_session_logs`
+> - `symphony_codex_tokens_total` → `symphony_agent_tokens_total`
+> - `symphony_codex_seconds_running` → `symphony_agent_seconds_running`
+>
+> The Elixir reference implementation under `elixir/` retains the original `codex_*` keys.
+> Consumers that need to support both runtimes must translate.
 
 ### 14.1 Lifecycle
 
@@ -1934,25 +1997,30 @@ this section pins down the wire shapes that the Go binary MUST emit so external 
 
 The Go runtime MUST mount the following routes when `-port>0`:
 
-| Method | Path                          | Status | Body shape                                                       |
-| ------ | ----------------------------- | ------ | ---------------------------------------------------------------- |
-| GET    | `/`                           | 200    | Server-rendered HTML (`text/html; charset=utf-8`).               |
-| GET    | `/ws`                         | 101    | WebSocket upgrade (see §14.4).                                   |
-| GET    | `/issue/{issue_identifier}`   | 200/404| Server-rendered issue detail HTML (`text/html; charset=utf-8`).  |
-| GET    | `/static/{file}`              | 200    | Embedded asset; `Cache-Control: public, max-age=3600`.           |
-| GET    | `/api/v1/state`               | 200    | Orchestrator snapshot JSON (see §14.3).                          |
-| GET    | `/api/v1/{issue_identifier}`  | 200/404| Per-issue payload or `issue_not_found` error.                    |
-| POST   | `/api/v1/refresh`             | 202    | `{"queued":true,"coalesced":bool,"requested_at":"…","operations":["poll","reconcile"]}`. |
-| GET    | `/healthz`                    | 200    | `ok\n` (`text/plain; charset=utf-8`).                            |
-| GET    | `/metrics`                    | 200    | Prometheus text format (`text/plain; version=0.0.4`); see §14.6. |
+| Method | Path                                                       | Status | Body shape                                                       |
+| ------ | ---------------------------------------------------------- | ------ | ---------------------------------------------------------------- |
+| GET    | `/`                                                        | 200    | Server-rendered HTML (`text/html; charset=utf-8`).               |
+| GET    | `/ws`                                                      | 101    | WebSocket upgrade (see §14.4).                                   |
+| GET    | `/issue/{issue_identifier}`                                | 200/404| Server-rendered issue detail HTML (`text/html; charset=utf-8`).  |
+| GET    | `/static/{file}`                                           | 200    | Embedded asset; `Cache-Control: public, max-age=3600`.           |
+| GET    | `/api/v1/state`                                            | 200    | Orchestrator snapshot JSON (see §14.3).                          |
+| GET    | `/api/v1/{issue_identifier}`                               | 200/404| Per-issue payload or `issue_not_found` error.                    |
+| POST   | `/api/v1/refresh`                                          | 202    | `{"queued":true,"coalesced":bool,…}`.                            |
+| POST   | `/api/v1/issues`                                           | 201/405| `{"issue_identifier":"…","issue_id":"…"}` on create; 405 with `unsupported_create` envelope when the active tracker is read-only. |
+| GET    | `/api/v1/issues/{issue_identifier}/spec`                   | 200/404| `{"identifier","body","etag"}` or `spec_not_found`.              |
+| PUT    | `/api/v1/issues/{issue_identifier}/spec`                   | 200/409| `{"identifier","etag"}`; 409 with `spec_conflict` on stale etag. |
+| POST   | `/api/v1/issues/{issue_identifier}/spec/generate`          | 202    | `{"identifier","job_id"}`.                                       |
+| GET    | `/api/v1/issues/{issue_identifier}/spec/generate/{job_id}` | 200    | `{"status":"pending"\|"done"\|"error", "body"?, "error"?}`.      |
+| GET    | `/healthz`                                                 | 200    | `ok\n` (`text/plain; charset=utf-8`).                            |
+| GET    | `/metrics`                                                 | 200    | Prometheus text format; see §14.6.                               |
 
 Normative requirements:
 
 - `Content-Type` for any `/api/v1/*` response MUST be `application/json; charset=utf-8`.
 - JSON field names for `/api/v1/state` MUST match `internal/observability/snapshot.go` exactly:
-  `counts`, `codex_totals`, `running`, `retrying`, `rate_limits`, `generated_at`. These mirror
-  Elixir's `SymphonyElixirWeb.Presenter.state_payload/2` so consumers can switch runtimes
-  without changing scrapers.
+  `counts`, `agent_totals`, `running`, `retrying`, `rate_limits`, `generated_at`, `kanban`.
+  See the **Divergence from the Elixir reference implementation** callout above; the Go
+  surface intentionally renames `codex_*` to `agent_*` so the API is provider-agnostic.
 - Unsupported methods on any `/api/v1/*` route MUST return `405` with the error envelope from
   §14.5 and a `code` of `method_not_allowed`. The mux's default 405 (empty body) is NOT
   conformant.
@@ -1982,16 +2050,19 @@ Refresh semantics:
 `GET /api/v1/state`. The struct fields and their `json:"…"` tags define the wire shape; this
 spec defers to the source file rather than re-stating every field.
 
-Mandatory top-level keys mirroring Elixir's Presenter:
+Mandatory top-level keys:
 
 - `counts` — running/retrying counters.
-- `codex_totals` — aggregate input/output/total tokens and `seconds_running` across all
-  observed sessions, including the elapsed time for the currently active ones.
+- `agent_totals` — aggregate input/output/total tokens and `seconds_running` across all
+  observed sessions, including the elapsed time for the currently active ones. (Elixir reference
+  implementation uses `codex_totals`; see the divergence callout above.)
 - `running[]` — one entry per in-flight dispatch.
 - `retrying[]` — one entry per scheduled retry.
 - `rate_limits` — latest agent-runtime rate-limit payload, or `null` if unset.
 - `generated_at` — RFC3339 timestamp at which the snapshot was assembled.
 - `polling` — orchestrator poll-loop state (see below).
+- `kanban[]` — five columns (`backlog`, `ready`, `in_progress`, `in_review`, `done`) used
+  by the dashboard's Kanban section. Cards are sorted by `issue_identifier`.
 
 The Go runtime constructs the snapshot synchronously by reading orchestrator state under its
 single mutex; the `timeout` and `unavailable` snapshot error modes from §13.3 are NOT emitted
@@ -2027,13 +2098,21 @@ zero) MUST return `0`.
   (server shutdown), or a frame write fails. The server MUST NOT keep dead subscribers
   registered.
 
-The dashboard renders a small `#ws-status` pill driven by the htmx-ws extension's lifecycle
-events. The pill MUST live outside the `#header-status` OOB-swap container so it is not
-clobbered by fragment pushes. Visible states are: `live` ("Live", green) on `htmx:wsOpen`,
-`connecting` ("Connecting…", grey) on `htmx:wsConnecting`, `disconnected` ("Reconnecting…",
-amber, pulsing) on `htmx:wsClose`, and `error` ("Connection error", red) on `htmx:wsError`.
-Reconnect itself is provided by the htmx-ws extension's exponential backoff; the dashboard
-only surfaces the events.
+The dashboard renders a small `#ws-status` pill driven by an in-page state machine. The
+pill MUST live outside the `#header-status` OOB-swap container so it is not clobbered by
+fragment pushes. The state machine:
+
+- Starts server-rendered as `connecting` ("Connecting…", grey). It is NEVER server-rendered
+  as `live`; the `live` transition only happens on `htmx:wsOpen`.
+- On `htmx:wsClose`, schedules a reconnect with exponential backoff (1s → 2s → 4s → 8s →
+  16s, capped at 30s) and shows "Reconnecting in Ns…" with a 250ms countdown tick.
+- On `htmx:wsOpen`, resets the backoff and shows "Live".
+- After 5 consecutive failed reconnects, transitions to `disconnected` ("Disconnected") and
+  stops scheduling further attempts so the operator knows the page is stale.
+- On `htmx:wsError`, shows "Connection error".
+
+Reconnect is triggered by removing and re-adding the `ws-connect` attribute on the body and
+re-running `htmx.process(body)` — the htmx-supported way to force a fresh handshake.
 
 ### 14.5 Error format
 
@@ -2071,9 +2150,9 @@ Prometheus exposition spec.
 | ----------------------------------------------- | ------- | ---------------------------------- |
 | `symphony_running_sessions`                     | gauge   | `snap.Counts.Running`              |
 | `symphony_retrying_sessions`                    | gauge   | `snap.Counts.Retrying`             |
-| `symphony_codex_tokens_total{type="input"}`     | counter | `snap.CodexTotals.InputTokens`     |
-| `symphony_codex_tokens_total{type="output"}`    | counter | `snap.CodexTotals.OutputTokens`    |
-| `symphony_codex_seconds_running`                | counter | `snap.CodexTotals.SecondsRunning`  |
+| `symphony_agent_tokens_total{type="input"}`     | counter | `snap.AgentTotals.InputTokens`     |
+| `symphony_agent_tokens_total{type="output"}`    | counter | `snap.AgentTotals.OutputTokens`    |
+| `symphony_agent_seconds_running`                | counter | `snap.AgentTotals.SecondsRunning`  |
 | `symphony_polling_checking`                     | gauge   | `snap.Polling.Checking` (0/1)      |
 | `symphony_polling_interval_ms`                  | gauge   | `snap.Polling.PollIntervalMs`      |
 
@@ -2730,3 +2809,51 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
+
+## Appendix B. Pull-Request Reconciliation (Go runtime extension)
+
+The Go runtime polls GitHub for the merge state of every issue with a known pull request,
+so the dashboard's Kanban view can move cards into "In Review" and "Done" without manual
+state changes. This appendix is normative for the Go binary; it has no Elixir analog.
+
+### B.1 Event source
+
+PR data has two writers:
+
+1. **Agent-event ingest.** A new `agent.EventPRLink` event is emitted whenever an
+   assistant message, tool call, tool result, or other-message payload contains a string
+   matching the regex `https://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)`. The
+   orchestrator records the link on the running entry's issue with `source: "agent_event"`
+   and `state: "open"` (the link itself does not carry merge information).
+2. **GitHub poll reconciler.** A goroutine started by `Orchestrator.WithPRReconciler`
+   re-fetches the PR state for every non-merged PR every `github.pr_poll_interval_ms`
+   (default 60000). The fetch uses the minimal `internal/github` client. Merged PRs are
+   not re-fetched; their state is final.
+
+### B.2 Configuration
+
+WORKFLOW.md gains an optional `github` block:
+
+```yaml
+github:
+  owner: my-org
+  repo: my-repo
+  token_env: GITHUB_TOKEN          # default
+  pr_poll_interval_ms: 60000       # default
+```
+
+When `github.owner` or `github.repo` is unset, the reconciler is disabled.
+
+## Appendix C. Spec Generation (Go runtime extension)
+
+The dashboard's `/issue/{id}` page exposes a "Generate spec" button for issues whose
+tracker reports `HasSpec == false`. Clicking it invokes the configured agent runtime with
+the prompt template in `internal/web/specgen.go`, instructing it to draft a Markdown
+proposal scaffold from the issue title + description. Generation is synchronous (per
+session, serialized via a mutex) with a 5-minute timeout; the assistant's last text payload
+is returned to the user as a draft. The user reviews and edits in the in-browser editor,
+then clicks Save to persist via `PUT /api/v1/issues/{id}/spec`.
+
+The agent runtime is the same `agent.Runtime` the orchestrator already loaded (codex,
+claude, or mock). Generation reuses the workspace ensured by `workspace.Manager` so the
+agent has read access to the repository when relevant.

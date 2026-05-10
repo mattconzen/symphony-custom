@@ -15,9 +15,9 @@
             </div>
 
             <div class="status-stack">
-              <span id="ws-status" class="ws-status ws-status-live" data-state="live">
+              <span id="ws-status" class="ws-status ws-status-connecting" data-state="connecting">
                 <span class="ws-status-dot"></span>
-                <span class="ws-status-label">Live</span>
+                <span class="ws-status-label">Connecting…</span>
               </span>
               <button
                 class="refresh-button"
@@ -40,6 +40,10 @@
             </p>
           </section>
         {{ else }}
+          <section id="kanban" class="section-card">
+            {{ template "kanban" . }}
+          </section>
+
           <section id="metric-grid" class="metric-grid">
             {{ template "metric-grid" . }}
           </section>
@@ -58,26 +62,152 @@
         {{ end }}
       </section>
     </main>
+    {{ if .CanCreateIssue }}
+      <dialog id="new-item-modal" class="new-item-modal">
+        <form id="new-item-form" method="dialog">
+          <h2>Create work item</h2>
+          <label for="new-item-title">Title</label>
+          <input id="new-item-title" name="title" type="text" maxlength="200" required />
+          <label for="new-item-desc">Description (Markdown)</label>
+          <textarea id="new-item-desc" name="description" rows="10"></textarea>
+          <p class="new-item-modal-error" id="new-item-error"></p>
+          <div class="new-item-modal-actions">
+            <button type="button" data-action="cancel-new-work-item">Cancel</button>
+            <button type="submit" class="primary">Create</button>
+          </div>
+        </form>
+      </dialog>
+      <script>
+        (function () {
+          var openBtn = document.querySelector('[data-action="open-new-work-item"]');
+          var modal = document.getElementById("new-item-modal");
+          var form = document.getElementById("new-item-form");
+          var cancelBtn = document.querySelector('[data-action="cancel-new-work-item"]');
+          var errBox = document.getElementById("new-item-error");
+          if (!openBtn || !modal || !form) return;
+
+          openBtn.addEventListener("click", function () {
+            errBox.style.display = "none";
+            errBox.textContent = "";
+            form.reset();
+            if (typeof modal.showModal === "function") {
+              modal.showModal();
+            }
+          });
+          cancelBtn.addEventListener("click", function () { modal.close(); });
+
+          form.addEventListener("submit", function (ev) {
+            ev.preventDefault();
+            var title = form.elements["title"].value.trim();
+            var desc = form.elements["description"].value;
+            if (!title) {
+              errBox.textContent = "Title is required";
+              errBox.style.display = "block";
+              return;
+            }
+            fetch("/api/v1/issues", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({title: title, description: desc, labels: ["dashboard"]})
+            }).then(function (resp) {
+              if (resp.status === 201) {
+                modal.close();
+                fetch("/api/v1/refresh", {method: "POST"});
+                return;
+              }
+              return resp.json().then(function (j) {
+                var msg = (j && j.error && j.error.message) || ("HTTP " + resp.status);
+                errBox.textContent = msg;
+                errBox.style.display = "block";
+              });
+            }).catch(function (err) {
+              errBox.textContent = String(err);
+              errBox.style.display = "block";
+            });
+          });
+        })();
+      </script>
+    {{ end }}
     <script>
       (function () {
         var pill = document.getElementById("ws-status");
         if (!pill) return;
         var label = pill.querySelector(".ws-status-label");
-        var states = {
-          "htmx:wsOpen":       { state: "live",         label: "Live" },
-          "htmx:wsConnecting": { state: "connecting",   label: "Connecting…" },
-          "htmx:wsClose":      { state: "disconnected", label: "Reconnecting…" },
-          "htmx:wsError":      { state: "error",        label: "Connection error" }
-        };
-        function apply(name) {
-          var s = states[name];
-          if (!s) return;
-          pill.setAttribute("data-state", s.state);
-          pill.className = "ws-status ws-status-" + s.state;
-          if (label) label.textContent = s.label;
+        var body = document.body;
+
+        function apply(state, text) {
+          pill.setAttribute("data-state", state);
+          pill.className = "ws-status ws-status-" + state;
+          if (label) label.textContent = text;
         }
-        Object.keys(states).forEach(function (evt) {
-          document.body.addEventListener(evt, function () { apply(evt); });
+
+        // Backoff schedule (ms) for reconnect attempts. After exhausting it,
+        // the pill flips to "Disconnected" and stops scheduling further
+        // attempts.
+        var BACKOFFS = [1000, 2000, 4000, 8000, 16000, 30000];
+        var MAX_FAILS = 5;
+        var failCount = 0;
+        var reconnectTimer = null;
+        var countdownTimer = null;
+
+        function clearTimers() {
+          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+          if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        }
+
+        function reconnect() {
+          // Removing and re-adding the ws-connect attribute is the
+          // htmx-supported way to force a fresh handshake.
+          var url = body.getAttribute("ws-connect") || "/ws";
+          body.removeAttribute("ws-connect");
+          // Force htmx to re-process the body so it picks up the new attribute.
+          if (window.htmx) {
+            window.htmx.process(body);
+          }
+          setTimeout(function () {
+            body.setAttribute("ws-connect", url);
+            if (window.htmx) {
+              window.htmx.process(body);
+            }
+          }, 50);
+        }
+
+        function scheduleReconnect() {
+          if (failCount >= MAX_FAILS) {
+            apply("disconnected", "Disconnected");
+            return;
+          }
+          var ms = BACKOFFS[Math.min(failCount, BACKOFFS.length - 1)];
+          var deadline = Date.now() + ms;
+          var update = function () {
+            var remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+            apply("disconnected", "Reconnecting in " + remaining + "s…");
+          };
+          update();
+          countdownTimer = setInterval(update, 250);
+          reconnectTimer = setTimeout(function () {
+            clearTimers();
+            failCount++;
+            reconnect();
+          }, ms);
+        }
+
+        body.addEventListener("htmx:wsOpen", function () {
+          clearTimers();
+          failCount = 0;
+          apply("live", "Live");
+        });
+        body.addEventListener("htmx:wsConnecting", function () {
+          if (!reconnectTimer) {
+            apply("connecting", "Connecting…");
+          }
+        });
+        body.addEventListener("htmx:wsClose", function () {
+          if (reconnectTimer) return; // already scheduled
+          scheduleReconnect();
+        });
+        body.addEventListener("htmx:wsError", function () {
+          apply("error", "Connection error");
         });
       })();
     </script>
@@ -113,16 +243,16 @@
 
   <article class="metric-card">
     <p class="metric-label">Total tokens</p>
-    <p class="metric-value numeric">{{ formatInt .CodexTotals.TotalTokens }}</p>
+    <p class="metric-value numeric">{{ formatInt .AgentTotals.TotalTokens }}</p>
     <p class="metric-detail numeric">
-      In {{ formatInt .CodexTotals.InputTokens }} / Out {{ formatInt .CodexTotals.OutputTokens }}
+      In {{ formatInt .AgentTotals.InputTokens }} / Out {{ formatInt .AgentTotals.OutputTokens }}
     </p>
   </article>
 
   <article class="metric-card">
     <p class="metric-label">Runtime</p>
     <p class="metric-value numeric">{{ formatRuntime (totalRuntimeSeconds .) }}</p>
-    <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
+    <p class="metric-detail">Total agent runtime across completed and active sessions.</p>
   </article>
 {{ end }}
 
@@ -164,7 +294,7 @@
             <th>State</th>
             <th>Session</th>
             <th>Runtime / turns</th>
-            <th>Codex update</th>
+            <th>Agent update</th>
             <th>Tokens</th>
           </tr>
         </thead>
@@ -213,6 +343,59 @@
       </table>
     </div>
   {{ end }}
+{{ end }}
+
+{{ define "kanban" }}
+  <div class="section-header">
+    <div>
+      <h2 class="section-title">Kanban</h2>
+      <p class="section-copy">Work items by lifecycle state.</p>
+    </div>
+    {{ if .CanCreateIssue }}
+      <button
+        class="refresh-button"
+        type="button"
+        data-action="open-new-work-item"
+        title="Create a new work item"
+      >+ New work item</button>
+    {{ end }}
+  </div>
+
+  <div class="kanban-grid">
+    {{ range .Kanban }}
+      <div class="kanban-column" data-column="{{ .Key }}">
+        <header class="kanban-column-header">
+          <span class="kanban-column-title">{{ .Title }}</span>
+          <span class="kanban-column-count numeric">{{ len .Cards }}</span>
+        </header>
+        <ul class="kanban-cards">
+          {{ range .Cards }}
+            <li class="kanban-card">
+              {{ if and .PR (eq .PR.State "merged") }}
+                <a class="kanban-card-link" href="{{ .PR.URL }}" target="_blank" rel="noopener">
+                  <span class="kanban-card-id">{{ .IssueIdentifier }}</span>
+                  <span class="kanban-card-title">{{ .Title }}</span>
+                  <span class="kanban-card-meta mono">PR #{{ .PR.Number }} · merged</span>
+                </a>
+              {{ else }}
+                <a class="kanban-card-link" href="/issue/{{ .IssueIdentifier }}">
+                  <span class="kanban-card-id">{{ .IssueIdentifier }}</span>
+                  <span class="kanban-card-title">{{ .Title }}</span>
+                  {{ if .PR }}
+                    <span class="kanban-card-meta mono">PR #{{ .PR.Number }} · {{ .PR.State }}</span>
+                  {{ else }}
+                    <span class="kanban-card-meta">{{ .State }}</span>
+                  {{ end }}
+                </a>
+              {{ end }}
+            </li>
+          {{ else }}
+            <li class="kanban-empty">empty</li>
+          {{ end }}
+        </ul>
+      </div>
+    {{ end }}
+  </div>
 {{ end }}
 
 {{ define "retrying-sessions" }}

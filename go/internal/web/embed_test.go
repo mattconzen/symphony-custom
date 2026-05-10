@@ -112,13 +112,15 @@ func TestDashboardTemplateExecutesWithMinimalData(t *testing.T) {
 	}
 
 	type snapshot struct {
-		Counts      observability.Counts
-		CodexTotals observability.TokenTotals
-		RateLimits  any
-		Running     []observability.RunningEntry
-		Retrying    []observability.RetryEntry
-		Polling     observability.Polling
-		Error       any
+		Counts         observability.Counts
+		AgentTotals    observability.TokenTotals
+		RateLimits     any
+		Running        []observability.RunningEntry
+		Retrying       []observability.RetryEntry
+		Polling        observability.Polling
+		Kanban         []observability.KanbanColumn
+		Error          any
+		CanCreateIssue bool
 	}
 
 	var buf bytes.Buffer

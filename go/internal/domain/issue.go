@@ -2,10 +2,31 @@
 package domain
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"time"
 )
+
+// ErrCreateUnsupported is returned by Tracker.CreateIssue on read-only
+// trackers (Linear, JIRA).
+var ErrCreateUnsupported = errors.New("tracker: create not supported by this tracker")
+
+// ErrSpecNotFound is returned by SpecReader.ReadSpec when no spec exists for
+// the identifier.
+var ErrSpecNotFound = errors.New("tracker: spec not found")
+
+// ErrSpecConflict is returned by SpecWriter.WriteSpec when the supplied
+// ifMatchEtag does not match the current spec's etag.
+var ErrSpecConflict = errors.New("tracker: spec conflict (stale etag)")
+
+// IssueDraft is the input to Tracker.CreateIssue. Adapters that need a
+// filesystem slug derive it from Title.
+type IssueDraft struct {
+	Title       string
+	Description string
+	Labels      []string
+}
 
 // nonWorkspaceKey matches characters not allowed in workspace keys.
 var nonWorkspaceKey = regexp.MustCompile(`[^A-Za-z0-9._\-]`)
@@ -15,6 +36,19 @@ type BlockerRef struct {
 	ID         string
 	Identifier string
 	State      string
+}
+
+// PullRequest captures the GitHub pull request associated with an issue.
+// Populated by agent-emitted pr_link events and by the GitHub PR reconciler.
+type PullRequest struct {
+	URL       string     `json:"url"`
+	Number    int        `json:"number"`
+	Owner     string     `json:"owner"`
+	Repo      string     `json:"repo"`
+	State     string     `json:"state"`
+	MergedAt  *time.Time `json:"merged_at,omitempty"`
+	Source    string     `json:"source"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 // Issue is the normalized issue record used by orchestration, prompt rendering,
@@ -32,6 +66,7 @@ type Issue struct {
 	BlockedBy   []BlockerRef
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
+	PR          *PullRequest
 }
 
 // WorkspaceKey returns the sanitized workspace directory name derived from the

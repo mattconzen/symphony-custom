@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -296,6 +297,195 @@ func (a *Adapter) CreateComment(_ context.Context, issueID, body string) error {
 		return fmt.Errorf("writing comment for %s: %w", issueID, err)
 	}
 	return nil
+}
+
+// CreateIssue creates a new openspec change directory with proposal.md and
+// tasks.md scaffolding. Slug is derived from the title.
+func (a *Adapter) CreateIssue(_ context.Context, draft domain.IssueDraft) (domain.Issue, error) {
+	if strings.TrimSpace(draft.Title) == "" {
+		return domain.Issue{}, fmt.Errorf("openspec: title is required")
+	}
+	slug := slugify(draft.Title)
+	if slug == "" {
+		slug = fmt.Sprintf("issue-%d", time.Now().UnixNano())
+	}
+	dirPath := filepath.Join(a.changesDir(), slug)
+	if _, err := os.Stat(dirPath); err == nil {
+		slug = fmt.Sprintf("%s-%d", slug, time.Now().Unix())
+		dirPath = filepath.Join(a.changesDir(), slug)
+	}
+
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		return domain.Issue{}, fmt.Errorf("openspec: mkdir %s: %w", dirPath, err)
+	}
+
+	proposal := buildProposalScaffold(draft)
+	tasks := buildTasksScaffold(draft)
+	if err := os.WriteFile(filepath.Join(dirPath, "proposal.md"), []byte(proposal), 0o644); err != nil {
+		return domain.Issue{}, fmt.Errorf("openspec: write proposal.md: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "tasks.md"), []byte(tasks), 0o644); err != nil {
+		return domain.Issue{}, fmt.Errorf("openspec: write tasks.md: %w", err)
+	}
+	return a.issueFromSlug(slug, dirPath, "Todo")
+}
+
+// HasSpec returns whether <root>/changes/<slug>/proposal.md or
+// <root>/archive/<slug>/proposal.md exists.
+func (a *Adapter) HasSpec(_ context.Context, identifier string) (bool, error) {
+	dirPath, _ := a.locateSlug(identifier)
+	if dirPath == "" {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(dirPath, "proposal.md")); err == nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+// FetchAllIssues returns active (changes/) and archived (archive/) issues.
+func (a *Adapter) FetchAllIssues(_ context.Context) ([]domain.Issue, error) {
+	var out []domain.Issue
+	for _, base := range []struct {
+		dir   string
+		state string
+	}{
+		{a.changesDir(), "Todo"},
+		{a.archiveDir(), "Done"},
+	} {
+		slugs, err := listSlugs(base.dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, slug := range slugs {
+			issue, err := a.issueFromSlug(slug, filepath.Join(base.dir, slug), base.state)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, issue)
+		}
+	}
+	return out, nil
+}
+
+// ReadSpec returns the proposal.md content for the given slug.
+func (a *Adapter) ReadSpec(_ context.Context, identifier string) (string, string, error) {
+	dirPath, _ := a.locateSlug(identifier)
+	if dirPath == "" {
+		return "", "", domain.ErrSpecNotFound
+	}
+	raw, err := os.ReadFile(filepath.Join(dirPath, "proposal.md"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", domain.ErrSpecNotFound
+		}
+		return "", "", fmt.Errorf("openspec: read proposal.md: %w", err)
+	}
+	body := string(raw)
+	return body, etagFor(body), nil
+}
+
+// WriteSpec writes proposal.md atomically.
+func (a *Adapter) WriteSpec(_ context.Context, identifier, body, ifMatchEtag string) (string, error) {
+	dirPath, _ := a.locateSlug(identifier)
+	if dirPath == "" {
+		// Allow creating the directory on first write.
+		dirPath = filepath.Join(a.changesDir(), identifier)
+		if err := os.MkdirAll(dirPath, 0o755); err != nil {
+			return "", fmt.Errorf("openspec: mkdir %s: %w", dirPath, err)
+		}
+	}
+	path := filepath.Join(dirPath, "proposal.md")
+	if ifMatchEtag != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("openspec: read %s: %w", path, err)
+		}
+		if err == nil && etagFor(string(raw)) != ifMatchEtag {
+			return "", domain.ErrSpecConflict
+		}
+	}
+	tmp, err := os.CreateTemp(dirPath, ".proposal-")
+	if err != nil {
+		return "", fmt.Errorf("openspec: create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write([]byte(body)); err != nil {
+		tmp.Close()        //nolint:errcheck
+		os.Remove(tmpName) //nolint:errcheck
+		return "", fmt.Errorf("openspec: write temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName) //nolint:errcheck
+		return "", fmt.Errorf("openspec: close temp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName) //nolint:errcheck
+		return "", fmt.Errorf("openspec: rename: %w", err)
+	}
+	return etagFor(body), nil
+}
+
+// SetPullRequest is a no-op for openspec (PR data is not persisted to disk);
+// the orchestrator keeps the in-memory copy.
+func (a *Adapter) SetPullRequest(_ context.Context, _ string, _ domain.PullRequest) error {
+	return nil
+}
+
+func buildProposalScaffold(draft domain.IssueDraft) string {
+	var sb strings.Builder
+	if len(draft.Labels) > 0 {
+		sb.WriteString("---\nlabels:\n")
+		for _, l := range draft.Labels {
+			sb.WriteString("  - ")
+			sb.WriteString(l)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("---\n\n")
+	}
+	sb.WriteString("# ")
+	sb.WriteString(draft.Title)
+	sb.WriteString("\n\n## Why\n\n")
+	if strings.TrimSpace(draft.Description) != "" {
+		sb.WriteString(strings.TrimSpace(draft.Description))
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString("_TODO_\n")
+	}
+	sb.WriteString("\n## What changes\n\n_TODO_\n\n## Acceptance\n\n_TODO_\n")
+	return sb.String()
+}
+
+func buildTasksScaffold(_ domain.IssueDraft) string {
+	return "# Tasks\n\n- [ ] _TODO_\n"
+}
+
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 60 {
+		out = out[:60]
+	}
+	return out
+}
+
+func etagFor(body string) string {
+	h := sha256.Sum256([]byte(body))
+	return fmt.Sprintf("%x", h)[:16]
 }
 
 // UpdateIssueState moves the slug's directory to the appropriate location based

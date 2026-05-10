@@ -296,6 +296,26 @@ func (a *Adapter) UpdateIssueState(ctx context.Context, issueID, stateName strin
 	return nil
 }
 
+// CreateIssue is not supported for Linear in this implementation.
+func (a *Adapter) CreateIssue(_ context.Context, _ domain.IssueDraft) (domain.Issue, error) {
+	return domain.Issue{}, domain.ErrCreateUnsupported
+}
+
+// HasSpec returns false; Linear has no OpenSpec concept.
+func (a *Adapter) HasSpec(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+
+// FetchAllIssues returns issues across both active and terminal state sets.
+func (a *Adapter) FetchAllIssues(ctx context.Context) ([]domain.Issue, error) {
+	combined := append([]string{}, a.cfg.Tracker.ActiveStates...)
+	combined = append(combined, a.cfg.Tracker.TerminalStates...)
+	if len(combined) == 0 {
+		return nil, nil
+	}
+	return a.FetchIssuesByStates(ctx, combined)
+}
+
 // resolveStateID uses queryResolveStateID to look up the state node ID for
 // stateName within the team that owns issueID.
 func (a *Adapter) resolveStateID(ctx context.Context, issueID, stateName string) (string, error) {

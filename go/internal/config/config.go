@@ -107,6 +107,17 @@ type Claude struct {
 	StallTimeoutMs int
 }
 
+// GitHub holds the optional github block: when set, the orchestrator
+// periodically polls GitHub for the PR state of issues whose agents have
+// emitted a pr_link event. Empty Owner OR Repo disables the reconciler.
+type GitHub struct {
+	Owner          string
+	Repo           string
+	TokenEnv       string
+	Token          string
+	PRPollInterval time.Duration
+}
+
 // Config is the fully resolved typed configuration per SPEC §4.1.3.
 type Config struct {
 	Tracker   Tracker
@@ -116,6 +127,7 @@ type Config struct {
 	Agent     Agent
 	Codex     Codex
 	Claude    Claude
+	GitHub    GitHub
 }
 
 // Resolve builds a Config from a workflow definition and the directory containing
@@ -322,6 +334,25 @@ func Resolve(wf domain.Workflow, workflowDir string) (Config, error) {
 	}
 	if cfg.Claude.StallTimeoutMs == 0 {
 		cfg.Claude.StallTimeoutMs = 300000
+	}
+
+	// ---- GitHub (optional) ----
+	if g, ok := wf.Config["github"]; ok {
+		if gm, ok := g.(map[string]any); ok {
+			cfg.GitHub.Owner = strVal(gm, "owner")
+			cfg.GitHub.Repo = strVal(gm, "repo")
+			cfg.GitHub.TokenEnv = strVal(gm, "token_env")
+			if cfg.GitHub.TokenEnv == "" {
+				cfg.GitHub.TokenEnv = "GITHUB_TOKEN"
+			}
+			cfg.GitHub.Token = os.Getenv(cfg.GitHub.TokenEnv)
+			if v := intVal(gm, "pr_poll_interval_ms"); v > 0 {
+				cfg.GitHub.PRPollInterval = time.Duration(v) * time.Millisecond
+			}
+		}
+	}
+	if cfg.GitHub.PRPollInterval == 0 {
+		cfg.GitHub.PRPollInterval = 60 * time.Second
 	}
 
 	return cfg, nil

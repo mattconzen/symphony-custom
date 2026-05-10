@@ -25,7 +25,7 @@ func sampleSnapshot() observability.Snapshot {
 	return observability.Snapshot{
 		GeneratedAt: time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC),
 		Counts:      observability.Counts{Running: 1, Retrying: 1},
-		CodexTotals: observability.TokenTotals{TotalTokens: 1500, InputTokens: 900, OutputTokens: 600, SecondsRunning: 42},
+		AgentTotals: observability.TokenTotals{TotalTokens: 1500, InputTokens: 900, OutputTokens: 600, SecondsRunning: 42},
 		Running: []observability.RunningEntry{
 			{
 				IssueID:         "issue-1",
@@ -88,8 +88,8 @@ func TestAPIState_ReturnsSnapshotJSON(t *testing.T) {
 	if got["retrying"] == nil {
 		t.Errorf("missing retrying")
 	}
-	if got["codex_totals"] == nil {
-		t.Errorf("missing codex_totals")
+	if got["agent_totals"] == nil {
+		t.Errorf("missing agent_totals")
 	}
 }
 
@@ -294,7 +294,7 @@ func TestAPIRefresh_Accepted_NotCoalesced(t *testing.T) {
 	t.Parallel()
 
 	src := &fakeSource{refreshQueued: true}
-	h := newHandlerFromSource(src)
+	h := newHandlerFromSource(src, nil, nil)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
@@ -336,7 +336,7 @@ func TestAPIRefresh_Accepted_Coalesced(t *testing.T) {
 	// refreshQueued=false simulates a refresh already pending — RequestRefresh
 	// returns false so coalesced=true.
 	src := &fakeSource{refreshQueued: false}
-	h := newHandlerFromSource(src)
+	h := newHandlerFromSource(src, nil, nil)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 

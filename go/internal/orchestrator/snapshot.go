@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"sort"
 	"time"
 
@@ -28,19 +29,37 @@ func (o *Orchestrator) Snapshot() observability.Snapshot {
 	defer o.mu.Unlock()
 
 	running := make([]observability.RunningEntry, 0, len(o.running))
+	runningIDs := make(map[string]struct{}, len(o.running))
 	for _, entry := range o.running {
 		running = append(running, runEntryToSnapshot(entry))
+		runningIDs[entry.issue.Identifier] = struct{}{}
 	}
 	sort.Slice(running, func(i, j int) bool {
 		return running[i].IssueIdentifier < running[j].IssueIdentifier
 	})
 
 	retrying := make([]observability.RetryEntry, 0, len(o.retryAttempts))
+	retryingIDs := make(map[string]struct{}, len(o.retryAttempts))
 	for _, ra := range o.retryAttempts {
 		retrying = append(retrying, retryEntryToSnapshot(ra))
+		retryingIDs[ra.Identifier] = struct{}{}
 	}
 	sort.Slice(retrying, func(i, j int) bool {
 		return retrying[i].IssueIdentifier < retrying[j].IssueIdentifier
+	})
+
+	prByID := make(map[string]domain.PullRequest, len(o.pullRequests))
+	for k, v := range o.pullRequests {
+		prByID[k] = v
+	}
+
+	kanban := observability.BuildKanban(observability.KanbanInputs{
+		AllIssues:      o.kanbanIssues,
+		RunningIDs:     runningIDs,
+		RetryingIDs:    retryingIDs,
+		SpecByID:       o.kanbanSpecs,
+		PRByID:         prByID,
+		TerminalStates: o.cfg.Tracker.TerminalStates,
 	})
 
 	return observability.Snapshot{
@@ -49,12 +68,36 @@ func (o *Orchestrator) Snapshot() observability.Snapshot {
 			Running:  len(running),
 			Retrying: len(retrying),
 		},
-		CodexTotals: o.codexTotals,
+		AgentTotals: o.agentTotals,
 		RateLimits:  o.rateLimits,
 		Running:     running,
 		Retrying:    retrying,
 		Polling:     o.buildPolling(),
+		Kanban:      kanban,
 	}
+}
+
+// refreshKanbanCache re-fetches all-issues + per-issue HasSpec from the
+// tracker and stores the result for future Snapshot() calls. Called from
+// the poll loop with the orchestrator-level context.
+func (o *Orchestrator) refreshKanbanCache(ctx context.Context) {
+	all, err := o.tracker.FetchAllIssues(ctx)
+	if err != nil {
+		o.log.Warn("kanban: FetchAllIssues failed", "err", err.Error())
+		return
+	}
+	specs := make(map[string]bool, len(all))
+	for _, iss := range all {
+		has, err := o.tracker.HasSpec(ctx, iss.Identifier)
+		if err != nil {
+			continue
+		}
+		specs[iss.Identifier] = has
+	}
+	o.mu.Lock()
+	o.kanbanIssues = all
+	o.kanbanSpecs = specs
+	o.mu.Unlock()
 }
 
 // buildPolling derives the Polling projection. Caller must hold o.mu.

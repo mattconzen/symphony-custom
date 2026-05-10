@@ -52,7 +52,7 @@
           <div class="section-header">
             <div>
               <h2 class="section-title">Tokens</h2>
-              <p class="section-copy">Codex token usage for this session.</p>
+              <p class="section-copy">Agent token usage for this session.</p>
             </div>
           </div>
           {{ if .Running }}
@@ -67,6 +67,28 @@
           {{ else }}
             <p class="empty-state">No token usage recorded.</p>
           {{ end }}
+        </section>
+
+        <section class="section-card" id="openspec-section" data-identifier="{{ .IssueIdentifier }}">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">OpenSpec</h2>
+              <p class="section-copy">View, edit, or generate the OpenSpec proposal for this work item.</p>
+            </div>
+          </div>
+          <div class="spec-toolbar">
+            <button type="button" class="refresh-button" data-action="spec-edit">Edit</button>
+            <button type="button" class="refresh-button" data-action="spec-generate">Generate spec</button>
+            <button type="button" class="refresh-button" data-action="spec-reload">Reload</button>
+          </div>
+          <div id="spec-rendered" class="spec-rendered">Loading…</div>
+          <div id="spec-editor" class="spec-editor" style="display: none;">
+            <textarea id="spec-body" spellcheck="false"></textarea>
+            <div class="spec-editor-actions">
+              <button type="button" class="refresh-button" data-action="spec-save">Save</button>
+              <button type="button" class="refresh-button" data-action="spec-cancel">Cancel</button>
+            </div>
+          </div>
         </section>
 
         {{ if .Retry }}
@@ -89,6 +111,100 @@
         {{ end }}
       </section>
     </main>
+    <script>
+      (function () {
+        var sec = document.getElementById("openspec-section");
+        if (!sec) return;
+        var id = sec.getAttribute("data-identifier");
+        var rendered = document.getElementById("spec-rendered");
+        var editor = document.getElementById("spec-editor");
+        var body = document.getElementById("spec-body");
+        var etag = "";
+
+        function show(view) {
+          rendered.style.display = (view === "rendered") ? "block" : "none";
+          editor.style.display   = (view === "editor")   ? "flex" : "none";
+        }
+
+        function load() {
+          show("rendered");
+          rendered.textContent = "Loading…";
+          fetch("/api/v1/issues/" + encodeURIComponent(id) + "/spec").then(function (r) {
+            if (r.status === 404) {
+              rendered.textContent = "No OpenSpec proposal yet. Click Generate or Edit to create one.";
+              etag = "";
+              body.value = "";
+              return;
+            }
+            if (!r.ok) {
+              rendered.textContent = "Error loading spec: HTTP " + r.status;
+              return;
+            }
+            return r.json().then(function (j) {
+              etag = j.etag || "";
+              body.value = j.body || "";
+              rendered.textContent = j.body || "";
+            });
+          });
+        }
+
+        sec.querySelector('[data-action="spec-edit"]').addEventListener("click", function () {
+          show("editor");
+        });
+        sec.querySelector('[data-action="spec-cancel"]').addEventListener("click", function () {
+          show("rendered");
+        });
+        sec.querySelector('[data-action="spec-reload"]').addEventListener("click", load);
+        sec.querySelector('[data-action="spec-save"]').addEventListener("click", function () {
+          fetch("/api/v1/issues/" + encodeURIComponent(id) + "/spec", {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({body: body.value, if_match_etag: etag})
+          }).then(function (r) {
+            if (r.status === 200) {
+              load();
+              return;
+            }
+            return r.json().then(function (j) {
+              alert((j && j.error && j.error.message) || ("HTTP " + r.status));
+            });
+          });
+        });
+        sec.querySelector('[data-action="spec-generate"]').addEventListener("click", function () {
+          rendered.textContent = "Generating draft via agent runtime…";
+          show("rendered");
+          fetch("/api/v1/issues/" + encodeURIComponent(id) + "/spec/generate", {method: "POST"})
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (!j.job_id) {
+                rendered.textContent = (j && j.error && j.error.message) || "Generate failed";
+                return;
+              }
+              poll(j.job_id);
+            });
+        });
+
+        function poll(jobID) {
+          fetch("/api/v1/issues/" + encodeURIComponent(id) + "/spec/generate/" + jobID)
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (j.status === "pending") {
+                setTimeout(function () { poll(jobID); }, 1500);
+                return;
+              }
+              if (j.status === "error") {
+                rendered.textContent = "Generate error: " + j.error;
+                return;
+              }
+              body.value = j.body || "";
+              rendered.textContent = j.body || "";
+              show("editor");
+            });
+        }
+
+        load();
+      })();
+    </script>
   </body>
 </html>
 
