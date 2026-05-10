@@ -3,6 +3,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Symphony Observability</title>
+    <script>
+      // Apply the saved theme before first paint to avoid a light-mode flash
+      // for dark-mode users. Falls back to the OS prefers-color-scheme query.
+      (function () {
+        try {
+          var saved = localStorage.getItem("symphony-theme");
+          var theme = (saved === "light" || saved === "dark")
+            ? saved
+            : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          document.documentElement.dataset.theme = theme;
+        } catch (e) {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/static/dashboard.css" />
     <script src="/static/htmx.min.js"></script>
     <script src="/static/htmx-ws.min.js"></script>

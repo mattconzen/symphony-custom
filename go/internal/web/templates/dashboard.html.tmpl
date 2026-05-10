@@ -20,6 +20,13 @@
                 <span class="ws-status-label">Connecting…</span>
               </span>
               <button
+                id="theme-toggle"
+                class="theme-toggle"
+                type="button"
+                aria-label="Switch theme"
+                title="Switch theme"
+              >🌙</button>
+              <button
                 class="refresh-button"
                 hx-post="/api/v1/refresh"
                 hx-swap="none"
@@ -128,6 +135,34 @@
         })();
       </script>
     {{ end }}
+    <script>
+      // Theme toggle: flips data-theme on <html>, persists to localStorage,
+      // and updates the button glyph + aria-label. Boot script in _head.tmpl
+      // applies the saved theme before first paint.
+      (function () {
+        var btn = document.getElementById("theme-toggle");
+        if (!btn) return;
+        var root = document.documentElement;
+        function paint(theme) {
+          if (theme === "dark") {
+            btn.textContent = "☀";
+            btn.setAttribute("aria-label", "Switch to light theme");
+            btn.setAttribute("title", "Switch to light theme");
+          } else {
+            btn.textContent = "🌙";
+            btn.setAttribute("aria-label", "Switch to dark theme");
+            btn.setAttribute("title", "Switch to dark theme");
+          }
+        }
+        paint(root.dataset.theme === "dark" ? "dark" : "light");
+        btn.addEventListener("click", function () {
+          var next = root.dataset.theme === "dark" ? "light" : "dark";
+          root.dataset.theme = next;
+          try { localStorage.setItem("symphony-theme", next); } catch (e) {}
+          paint(next);
+        });
+      })();
+    </script>
     <script>
       // Pause/Resume/Cancel button delegation. The dashboard renders new
       // button DOM on every WS fragment swap, so we delegate from the body

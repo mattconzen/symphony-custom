@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --page: #f7f7f8;
   --page-soft: #fbfbfc;
   --page-deep: #ececf1;
@@ -16,6 +16,31 @@
   --danger-soft: #fef3f2;
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
   --shadow-lg: 0 20px 50px rgba(15, 23, 42, 0.08);
+  --body-gradient-tint: rgba(16, 163, 127, 0.12);
+  --body-gradient-tint-fade: rgba(16, 163, 127, 0);
+  --body-gradient-end: #f3f4f6;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #14161b;
+  --page-soft: #1a1d23;
+  --page-deep: #0f1116;
+  --card: rgba(30, 33, 40, 0.94);
+  --card-muted: #1f232b;
+  --ink: #e7e9ee;
+  --muted: #9aa0aa;
+  --line: #2a2f38;
+  --line-strong: #3a4150;
+  --accent: #1ec38f;
+  --accent-ink: #c8f3e2;
+  --accent-soft: rgba(30, 195, 143, 0.14);
+  --danger-soft: rgba(180, 35, 24, 0.18);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.55);
+  --body-gradient-tint: rgba(30, 195, 143, 0.10);
+  --body-gradient-tint-fade: rgba(30, 195, 143, 0);
+  --body-gradient-end: #0d0f13;
 }
 
 * {
@@ -30,8 +55,8 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    radial-gradient(circle at top, rgba(16, 163, 127, 0.12) 0%, rgba(16, 163, 127, 0) 30%),
-    linear-gradient(180deg, var(--page-soft) 0%, var(--page) 24%, #f3f4f6 100%);
+    radial-gradient(circle at top, var(--body-gradient-tint) 0%, var(--body-gradient-tint-fade) 30%),
+    linear-gradient(180deg, var(--page-soft) 0%, var(--page) 24%, var(--body-gradient-end) 100%);
   color: var(--ink);
   font-family: "Sohne", "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
   line-height: 1.5;
@@ -85,7 +110,7 @@ button.secondary:hover {
 .subtle-button {
   appearance: none;
   border: 1px solid var(--line-strong);
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--card-muted);
   color: var(--muted);
   border-radius: 999px;
   padding: 0.34rem 0.72rem;
@@ -104,7 +129,7 @@ button.secondary:hover {
 .subtle-button:hover {
   transform: none;
   box-shadow: none;
-  background: white;
+  background: var(--card);
   border-color: var(--muted);
   color: var(--ink);
 }
@@ -221,7 +246,7 @@ pre,
 }
 
 .ws-status-connecting {
-  background: #f5f5f7;
+  background: var(--card-muted);
   border-color: var(--line-strong);
   color: var(--muted);
 }
@@ -274,7 +299,7 @@ pre,
 .refresh-button:hover {
   transform: none;
   box-shadow: none;
-  background: white;
+  background: var(--card);
   border-color: var(--muted);
   color: var(--ink);
 }
@@ -292,6 +317,56 @@ pre,
 .refresh-button[hx-request] {
   opacity: 0.55;
   cursor: progress;
+}
+
+.theme-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 1.6rem;
+  min-width: 1.9rem;
+  padding: 0.22rem 0.62rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--card-muted);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: none;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+.theme-toggle:hover {
+  transform: none;
+  box-shadow: none;
+  background: var(--card);
+  border-color: var(--muted);
+  color: var(--ink);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  color: var(--ink);
+}
+
+.theme-toggle:disabled,
+.theme-toggle[disabled] {
+  cursor: not-allowed;
+  opacity: 0.55;
+  background: var(--card-muted);
+  border-color: var(--line);
+  color: var(--muted);
 }
 
 .poll-badge {
@@ -494,9 +569,9 @@ pre,
   margin-top: 1rem;
   padding: 1rem;
   border-radius: 18px;
-  background: #f5f5f7;
+  background: var(--card-muted);
   border: 1px solid var(--line);
-  color: #353740;
+  color: var(--ink);
   font-size: 0.9rem;
 }
 
@@ -508,7 +583,7 @@ pre,
 .error-card {
   border-radius: 24px;
   padding: 1.25rem;
-  background: linear-gradient(180deg, #fff8f7 0%, var(--danger-soft) 100%);
+  background: var(--danger-soft);
   border-color: #f6d3cf;
 }
 
