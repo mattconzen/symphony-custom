@@ -67,11 +67,8 @@ func (o *Orchestrator) dispatchPipeline(ctx context.Context, issue domain.Issue)
 	idx := 0
 	if entry, ok := o.runEntryForIssue(issue.ID); ok && entry.pipeline != nil && entry.pipeline.CurrentRole != "" {
 		// Resume support: pick up at the recorded current role.
-		for i, r := range roles {
-			if r.Role == entry.pipeline.CurrentRole {
-				idx = i
-				break
-			}
+		if i := findRoleIndex(roles, entry.pipeline.CurrentRole); i >= 0 {
+			idx = i
 		}
 	}
 
@@ -107,13 +104,7 @@ func (o *Orchestrator) dispatchPipeline(ctx context.Context, issue domain.Issue)
 
 		// Loopback check: did the agent write any of the on_artifact paths?
 		if loopback, target := o.detectLoopback(ws, role); loopback {
-			loopIdx := -1
-			for i, r := range roles {
-				if r.Role == target.RetryFrom {
-					loopIdx = i
-					break
-				}
-			}
+			loopIdx := findRoleIndex(roles, target.RetryFrom)
 			if loopIdx < 0 {
 				err := fmt.Errorf("pipeline role %q: on_artifact target %q is not a known role", role.Role, target.RetryFrom)
 				log.Error("pipeline: loopback target unknown", "role", role.Role, "target", target.RetryFrom)
@@ -363,4 +354,14 @@ func roleNames(roles []config.PipelineRole) string {
 		names = append(names, r.Role)
 	}
 	return strings.Join(names, "→")
+}
+
+// findRoleIndex returns the position of name in roles, or -1 if missing.
+func findRoleIndex(roles []config.PipelineRole, name string) int {
+	for i, r := range roles {
+		if r.Role == name {
+			return i
+		}
+	}
+	return -1
 }
