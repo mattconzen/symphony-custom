@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openai/symphony/go/internal/observability"
 )
 
 // Funcs returns the template.FuncMap required by dashboard.html.tmpl. The
@@ -22,6 +24,7 @@ func Funcs() template.FuncMap {
 		"stateBadgeClass":      stateBadgeClass,
 		"runtimeAndTurns":      runtimeAndTurns,
 		"totalRuntimeSeconds":  totalRuntimeSeconds,
+		"formatNextPoll":       formatNextPoll,
 	}
 }
 
@@ -113,6 +116,32 @@ func totalRuntimeSeconds(snap any) int64 {
 		total += runtimeSecondsFrom(started, now)
 	}
 	return total
+}
+
+// formatNextPoll renders the polling-state badge text for the dashboard
+// header. When Checking is true, callers should display "Checking…" with a
+// pulse; otherwise it returns a coarse human-readable countdown like
+// "1.5s", "1m", or "1m 5s". A NextPollInMs of 0 (or negative) is rendered
+// as "any moment" so the UI reads sensibly when the loop is about to fire.
+func formatNextPoll(p observability.Polling) string {
+	if p.Checking {
+		return "Checking…"
+	}
+	ms := p.NextPollInMs
+	if ms <= 0 {
+		return "any moment"
+	}
+	if ms < 60_000 {
+		secs := float64(ms) / 1000.0
+		return fmt.Sprintf("%.1fs", secs)
+	}
+	totalSecs := ms / 1000
+	mins := totalSecs / 60
+	secs := totalSecs % 60
+	if secs == 0 {
+		return fmt.Sprintf("%dm", mins)
+	}
+	return fmt.Sprintf("%dm %ds", mins, secs)
 }
 
 func runtimeSecondsFrom(startedAt any, now time.Time) int64 {

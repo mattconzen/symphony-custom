@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"strings"
 	"testing"
+
+	"github.com/openai/symphony/go/internal/observability"
 )
 
 func TestTemplatesFSContainsDashboard(t *testing.T) {
@@ -109,21 +111,13 @@ func TestDashboardTemplateExecutesWithMinimalData(t *testing.T) {
 		t.Fatalf("parse template: %v", err)
 	}
 
-	type tokens struct {
-		TotalTokens, InputTokens, OutputTokens int64
-	}
-	type counts struct {
-		Running, Retrying int
-	}
-	type codexTotals struct {
-		TotalTokens, InputTokens, OutputTokens, SecondsRunning int64
-	}
 	type snapshot struct {
-		Counts      counts
-		CodexTotals codexTotals
+		Counts      observability.Counts
+		CodexTotals observability.TokenTotals
 		RateLimits  any
-		Running     []any
-		Retrying    []any
+		Running     []observability.RunningEntry
+		Retrying    []observability.RetryEntry
+		Polling     observability.Polling
 		Error       any
 	}
 

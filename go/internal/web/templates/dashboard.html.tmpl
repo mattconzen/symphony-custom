@@ -85,14 +85,17 @@
 </html>
 
 {{ define "header-status" }}
-  <span class="status-badge status-badge-live">
-    <span class="status-badge-dot"></span>
-    Live
-  </span>
-  <span class="status-badge status-badge-offline">
-    <span class="status-badge-dot"></span>
-    Offline
-  </span>
+  {{ if .Polling.Checking }}
+    <span class="poll-badge poll-badge-checking" data-state="checking">
+      <span class="poll-badge-dot"></span>
+      Checking&nbsp;…
+    </span>
+  {{ else }}
+    <span class="poll-badge poll-badge-idle" data-state="idle">
+      <span class="poll-badge-dot"></span>
+      Next poll in {{ formatNextPoll .Polling }}
+    </span>
+  {{ end }}
 {{ end }}
 
 {{ define "metric-grid" }}
@@ -171,7 +174,7 @@
               <td>
                 <div class="issue-stack">
                   <span class="issue-id">{{ .IssueIdentifier }}</span>
-                  <a class="issue-link" href="/api/v1/{{ .IssueIdentifier }}">JSON details</a>
+                  <a class="issue-link" href="/issue/{{ .IssueIdentifier }}">Details</a>
                 </div>
               </td>
               <td>
@@ -239,7 +242,7 @@
               <td>
                 <div class="issue-stack">
                   <span class="issue-id">{{ .IssueIdentifier }}</span>
-                  <a class="issue-link" href="/api/v1/{{ .IssueIdentifier }}">JSON details</a>
+                  <a class="issue-link" href="/issue/{{ .IssueIdentifier }}">Details</a>
                 </div>
               </td>
               <td>{{ .Attempt }}</td>

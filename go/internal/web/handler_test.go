@@ -136,6 +136,71 @@ func TestDashboard_RefreshButton(t *testing.T) {
 	}
 }
 
+func TestDashboard_PollingIndicator_Idle(t *testing.T) {
+	t.Parallel()
+
+	snap := observability.Snapshot{
+		Polling: observability.Polling{Checking: false, NextPollInMs: 1500},
+	}
+	h := newTestHandler(snap)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	for _, marker := range []string{
+		`class="poll-badge poll-badge-idle"`,
+		`Next poll in 1.5s`,
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Errorf("body missing %q", marker)
+		}
+	}
+	if strings.Contains(string(body), "Checking") {
+		t.Errorf("idle render unexpectedly contains 'Checking'")
+	}
+}
+
+func TestDashboard_PollingIndicator_Checking(t *testing.T) {
+	t.Parallel()
+
+	snap := observability.Snapshot{
+		Polling: observability.Polling{Checking: true},
+	}
+	h := newTestHandler(snap)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	for _, marker := range []string{
+		`class="poll-badge poll-badge-checking"`,
+		`Checking`,
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Errorf("body missing %q", marker)
+		}
+	}
+}
+
 func TestIssueDetailPage_Found(t *testing.T) {
 	t.Parallel()
 
