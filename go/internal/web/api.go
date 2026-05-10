@@ -3,8 +3,10 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"time"
 
+	"github.com/openai/symphony/go/internal/domain"
 	"github.com/openai/symphony/go/internal/observability"
 )
 
@@ -49,7 +51,7 @@ func (h *Handler) handleAPIIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, ok := buildIssuePayload(h.orch.Snapshot(), id, "")
+	payload, ok := buildIssuePayload(h.orch.Snapshot(), id, h.orch.WorkspaceRoot())
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "issue_not_found", "Issue not found")
 		return
@@ -136,8 +138,10 @@ type issuePayload struct {
 
 // buildIssuePayload extracts and projects the per-issue payload for
 // identifier id from snap. Returns ok=false when neither a running nor a
-// retry entry matches. workspaceRoot is reserved for future synthesis of
-// workspace.path when neither entry carries a path; pass "" to skip.
+// retry entry matches. When neither entry carries a workspace path and
+// workspaceRoot is non-empty, workspace.path is synthesized from
+// `filepath.Join(workspaceRoot, Issue{Identifier: id}.WorkspaceKey())` —
+// matching the path the orchestrator will create on first dispatch.
 func buildIssuePayload(snap observability.Snapshot, id string, workspaceRoot string) (issuePayload, bool) {
 	var running *observability.RunningEntry
 	for i := range snap.Running {
@@ -161,7 +165,7 @@ func buildIssuePayload(snap observability.Snapshot, id string, workspaceRoot str
 		IssueIdentifier: id,
 		IssueID:         issueIDFromEntries(running, retry),
 		Status:          issueStatus(running, retry),
-		Workspace:       buildWorkspace(running, retry),
+		Workspace:       buildWorkspace(id, running, retry, workspaceRoot),
 		Attempts:        buildAttempts(retry),
 		Logs:            issueLogs{CodexSessionLogs: []any{}},
 		RecentEvents:    buildRecentEvents(running),
@@ -228,12 +232,12 @@ func buildAttempts(retry *observability.RetryEntry) issueAttempts {
 	return issueAttempts{RestartCount: restart, CurrentRetryAttempt: attempt}
 }
 
-// buildWorkspace prefers the running entry, then the retry entry. Unlike
-// Elixir, we do not synthesize a workspace path from the configured root
-// when both are nil — the dashboard is read-only and exposing the
-// orchestrator's configured root through the web layer would couple
-// internal/web to internal/config. Callers see `null` instead.
-func buildWorkspace(running *observability.RunningEntry, retry *observability.RetryEntry) issueWorkspace {
+// buildWorkspace prefers the running entry, then the retry entry. When
+// neither has recorded a workspace path and workspaceRoot is non-empty,
+// the path is synthesized from the issue identifier's WorkspaceKey under
+// workspaceRoot — matching the directory the orchestrator will create on
+// first dispatch (parity with Elixir's Presenter behaviour).
+func buildWorkspace(id string, running *observability.RunningEntry, retry *observability.RetryEntry, workspaceRoot string) issueWorkspace {
 	var path, host *string
 	if running != nil {
 		path = running.WorkspacePath
@@ -244,6 +248,10 @@ func buildWorkspace(running *observability.RunningEntry, retry *observability.Re
 	}
 	if host == nil && retry != nil {
 		host = retry.WorkerHost
+	}
+	if path == nil && workspaceRoot != "" {
+		synth := filepath.Join(workspaceRoot, domain.Issue{Identifier: id}.WorkspaceKey())
+		path = &synth
 	}
 	return issueWorkspace{Path: path, Host: host}
 }

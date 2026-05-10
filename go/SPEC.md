@@ -1963,11 +1963,12 @@ Normative requirements:
   is currently no plumbed refresh trigger. The 202 envelope therefore acts as an
   accept-and-no-op acknowledgement. This MAY change in a later phase if an out-of-band refresh
   trigger is added; consumers MUST accept that the response shape stays the same regardless.
-- `GET /api/v1/{issue_identifier}` returns `workspace.path: null` whenever neither the running
-  nor retrying entry for the issue carries a workspace path. Elixir synthesizes a path from
-  the configured workflow root + identifier; the Go runtime deliberately keeps the web layer
-  decoupled from `internal/config` and surfaces `null` instead. Consumers MUST treat `null`
-  as a valid value for `workspace.path` and `workspace.host`.
+- `GET /api/v1/{issue_identifier}` returns `workspace.path` as the resolved or synthesized
+  workspace directory for the issue. When neither the running nor retrying entry has recorded
+  a path, the orchestrator's configured workspace root joined with the issue identifier's
+  sanitized workspace key is returned. Consumers MUST treat it as the canonical path even
+  when no dispatch has yet created the directory on disk. `workspace.host` MAY still be
+  `null` when no entry has recorded a worker host.
 
 ### 14.3 Snapshot data contract
 

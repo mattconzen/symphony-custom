@@ -205,6 +205,46 @@ func TestAPIIssue_ReturnsRetryingPayload(t *testing.T) {
 	}
 }
 
+func TestAPIIssue_SynthesizesWorkspacePathFromRoot(t *testing.T) {
+	t.Parallel()
+
+	// Retry-only entry with no WorkspacePath — workspace.path should be
+	// synthesized from the configured workspace root and the issue
+	// identifier's WorkspaceKey.
+	due := time.Date(2026, 5, 9, 12, 5, 0, 0, time.UTC)
+	snap := observability.Snapshot{
+		Counts: observability.Counts{Retrying: 1},
+		Retrying: []observability.RetryEntry{
+			{IssueID: "issue-7", IssueIdentifier: "TEST 7", Attempt: 1, DueAt: &due},
+		},
+	}
+	h := newTestHandlerWithRoot(snap, "/srv/symphony/work")
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/api/v1/TEST%207")
+	if err != nil {
+		t.Fatalf("GET issue: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	ws, ok := got["workspace"].(map[string]any)
+	if !ok {
+		t.Fatalf("workspace not an object: %T", got["workspace"])
+	}
+	if ws["path"] != "/srv/symphony/work/TEST_7" {
+		t.Errorf("workspace.path: got %v want /srv/symphony/work/TEST_7", ws["path"])
+	}
+}
+
 func TestAPIIssue_NotFound(t *testing.T) {
 	t.Parallel()
 

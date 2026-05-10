@@ -33,6 +33,7 @@ type dashboardError struct {
 // fakes that don't need a full orchestrator wiring.
 type snapshotSource interface {
 	Snapshot() observability.Snapshot
+	WorkspaceRoot() string
 }
 
 // Handler bundles the dashboard's HTTP surface area. Construct it via
