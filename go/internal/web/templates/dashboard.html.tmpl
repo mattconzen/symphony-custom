@@ -129,6 +129,24 @@
       </script>
     {{ end }}
     <script>
+      // Pause/Resume/Cancel button delegation. The dashboard renders new
+      // button DOM on every WS fragment swap, so we delegate from the body
+      // rather than attach per-button listeners.
+      (function () {
+        document.body.addEventListener("click", function (ev) {
+          var btn = ev.target.closest("[data-action]");
+          if (!btn) return;
+          var action = btn.getAttribute("data-action");
+          var id = btn.getAttribute("data-issue");
+          if (!id) return;
+          if (action === "cancel" && !window.confirm("Cancel " + id + "? This is final.")) return;
+          if (action !== "pause" && action !== "resume" && action !== "cancel") return;
+          fetch("/api/v1/issues/" + encodeURIComponent(id) + "/" + action, {method: "POST"})
+            .then(function () { return fetch("/api/v1/refresh", {method: "POST"}); });
+        });
+      })();
+    </script>
+    <script>
       (function () {
         var pill = document.getElementById("ws-status");
         if (!pill) return;
@@ -287,6 +305,7 @@
           <col style="width: 8.5rem;" />
           <col />
           <col style="width: 10rem;" />
+          <col style="width: 9rem;" />
         </colgroup>
         <thead>
           <tr>
@@ -296,11 +315,12 @@
             <th>Runtime / turns</th>
             <th>Agent update</th>
             <th>Tokens</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
           {{ range .Running }}
-            <tr>
+            <tr class="run-row {{ if eq .RunState "paused" }}run-paused{{ end }} {{ if eq .RunState "pause_requested" }}run-pausing{{ end }} {{ if eq .RunState "cancel_requested" }}run-cancelling{{ end }}">
               <td>
                 <div class="issue-stack">
                   <span class="issue-id">{{ .IssueIdentifier }}</span>
@@ -309,6 +329,9 @@
               </td>
               <td>
                 <span class="{{ stateBadgeClass .State }}">{{ .State }}</span>
+                {{ if and .RunState (ne .RunState "running") }}
+                  <span class="run-state-chip run-state-{{ .RunState }}">{{ .RunState }}</span>
+                {{ end }}
               </td>
               <td>
                 <div class="session-stack">
@@ -335,6 +358,18 @@
                 <div class="token-stack numeric">
                   <span>Total: {{ formatInt .Tokens.TotalTokens }}</span>
                   <span class="muted">In {{ formatInt .Tokens.InputTokens }} / Out {{ formatInt .Tokens.OutputTokens }}</span>
+                </div>
+              </td>
+              <td>
+                <div class="run-actions">
+                  {{ if eq .RunState "paused" }}
+                    <button class="run-btn run-btn-resume" data-action="resume" data-issue="{{ .IssueIdentifier }}">Resume</button>
+                  {{ else if eq .RunState "pause_requested" }}
+                    <button class="run-btn" disabled>Pausing…</button>
+                  {{ else }}
+                    <button class="run-btn run-btn-pause" data-action="pause" data-issue="{{ .IssueIdentifier }}">Pause</button>
+                  {{ end }}
+                  <button class="run-btn run-btn-cancel" data-action="cancel" data-issue="{{ .IssueIdentifier }}">Cancel</button>
                 </div>
               </td>
             </tr>

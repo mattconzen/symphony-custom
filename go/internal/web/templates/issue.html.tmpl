@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
   {{ template "head" . }}
-  <body>
+  <body hx-ext="ws" ws-connect="/ws">
     <main class="app-shell">
       <section class="dashboard-shell">
         <header class="hero-card">
@@ -109,6 +109,31 @@
             </dl>
           </section>
         {{ end }}
+
+        <section class="section-card transcript-card" data-identifier="{{ .IssueIdentifier }}">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Transcript</h2>
+              <p class="section-copy">Per-issue agent event stream (live-tailed over the WS).</p>
+            </div>
+            <div class="transcript-toolbar">
+              <button type="button" class="refresh-button" data-action="transcript-pause">Pause live</button>
+              <button type="button" class="refresh-button" data-action="transcript-clear">Clear</button>
+            </div>
+          </div>
+          <ol id="transcript-{{ .IssueIdentifier }}" class="transcript-events">
+            {{ range .Transcript }}
+              <li class="transcript-event" data-kind="{{ .Kind }}">
+                <span class="ts mono">{{ .Ts }}</span>
+                <span class="kind">{{ .Kind }}</span>
+                {{ if .Role }}<span class="role">{{ .Role }}</span>{{ end }}
+                <pre class="payload">{{ prettyValue .Payload }}</pre>
+              </li>
+            {{ else }}
+              <li class="transcript-empty">No transcript events yet.</li>
+            {{ end }}
+          </ol>
+        </section>
       </section>
     </main>
     <script>
@@ -203,6 +228,48 @@
         }
 
         load();
+      })();
+    </script>
+    <script>
+      (function () {
+        var card = document.querySelector(".transcript-card");
+        if (!card) return;
+        var id = card.getAttribute("data-identifier");
+        var list = document.getElementById("transcript-" + id);
+        var paused = false;
+        var origAppend;
+
+        // Hook the WS open event to send a subscribe message. htmx fires
+        // htmx:wsOpen on the body when /ws is up.
+        document.body.addEventListener("htmx:wsOpen", function (ev) {
+          try {
+            var socket = ev.detail && ev.detail.socketWrapper && ev.detail.socketWrapper.socket;
+            if (socket) {
+              socket.send(JSON.stringify({subscribe_transcript: id}));
+            }
+          } catch (e) {}
+        });
+
+        function setPaused(p) {
+          paused = p;
+          if (paused) {
+            origAppend = list.appendChild;
+            list.appendChild = function () { return null; };
+          } else if (origAppend) {
+            list.appendChild = origAppend;
+            origAppend = null;
+          }
+        }
+
+        var pauseBtn = card.querySelector('[data-action="transcript-pause"]');
+        var clearBtn = card.querySelector('[data-action="transcript-clear"]');
+        if (pauseBtn) pauseBtn.addEventListener("click", function () {
+          setPaused(!paused);
+          pauseBtn.textContent = paused ? "Resume live" : "Pause live";
+        });
+        if (clearBtn) clearBtn.addEventListener("click", function () {
+          while (list.firstChild) list.removeChild(list.firstChild);
+        });
       })();
     </script>
   </body>

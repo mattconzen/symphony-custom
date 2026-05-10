@@ -11,10 +11,39 @@ import (
 	"github.com/openai/symphony/go/internal/agent"
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/durable"
 	"github.com/openai/symphony/go/internal/observability"
 	"github.com/openai/symphony/go/internal/tracker"
+	"github.com/openai/symphony/go/internal/transcript"
 	"github.com/openai/symphony/go/internal/workspace"
 )
+
+// runState enumerates the operator-controlled lifecycle states for one
+// in-flight dispatch. Values are stable across the wire as the strings
+// returned by runState.String().
+type runState int
+
+const (
+	runStateRunning runState = iota
+	runStatePauseRequested
+	runStatePaused
+	runStateCancelRequested
+)
+
+// String returns the wire form of the state, matching the
+// `run_state` JSON field on observability.RunningEntry.
+func (s runState) String() string {
+	switch s {
+	case runStatePauseRequested:
+		return "pause_requested"
+	case runStatePaused:
+		return "paused"
+	case runStateCancelRequested:
+		return "cancel_requested"
+	default:
+		return "running"
+	}
+}
 
 // runEntry tracks an in-flight dispatch for one issue. Fields beyond
 // (issue, cancel) feed the observability snapshot and mirror the per-running
@@ -32,6 +61,19 @@ type runEntry struct {
 	lastMessage   string
 	lastEventAt   time.Time
 	tokens        observability.EntryTokens
+
+	// state and pauseCh implement the Pause/Resume/Cancel protocol. pauseCh
+	// is allocated lazily on the first Pause; the turn loop receives from
+	// it (blocking) until Resume closes it. pauseClosed guards close(pauseCh)
+	// so Resume and RequestCancel racing for the same channel will close it
+	// exactly once (replaces the prior recover()-based safeClose).
+	state       runState
+	pauseCh     chan struct{}
+	pauseClosed bool
+
+	// pipeline tracks per-role progress when the issue runs under
+	// agent.pipeline. Nil for single-role dispatches.
+	pipeline *domain.PipelineProgress
 }
 
 // Orchestrator is the poll-loop coordinator per SPEC §§7–8.
@@ -94,6 +136,24 @@ type Orchestrator struct {
 	// nil disables the reconciler.
 	prFetcher  prFetcher
 	prInterval time.Duration
+
+	// durable is the optional JSON-on-disk persistence layer. When non-nil,
+	// the orchestrator loads state on Run start and writes it back on every
+	// notify (debounced) plus once on shutdown.
+	durable *durable.Store
+	// dirty is set whenever observable state changes; cleared by the
+	// persistence goroutine after a successful save. Guarded by mu.
+	dirty bool
+
+	// transcriptBus is the optional live fan-out for transcript events.
+	// When set, every agent.Event written to the per-dispatch JSONL is
+	// also published to the bus for WebSocket subscribers.
+	transcriptBus *transcript.Bus
+
+	// roleRuntimes maps pipeline role name -> Runtime. Populated once at
+	// orchestrator startup when cfg.Agent.Pipeline is non-empty. Each
+	// runtime is reused across dispatches.
+	roleRuntimes map[string]agent.Runtime
 }
 
 // WithPRReconciler enables the GitHub PR reconciler. interval=0 disables it
@@ -104,6 +164,27 @@ func (o *Orchestrator) WithPRReconciler(fetcher prFetcher, interval time.Duratio
 	return o
 }
 
+// WithDurableStore attaches a durable.Store. When set, the orchestrator
+// loads `orchestrator.json` at the start of Run() and writes it back on
+// every state transition (debounced) plus once on shutdown. Pass nil to
+// disable durability.
+func (o *Orchestrator) WithDurableStore(s *durable.Store) *Orchestrator {
+	o.durable = s
+	return o
+}
+
+// WithTranscriptBus attaches a live transcript fan-out. Every agent.Event
+// captured during dispatch is published to bus in addition to being
+// written to the per-issue JSONL. Pass nil to disable live streaming.
+func (o *Orchestrator) WithTranscriptBus(bus *transcript.Bus) *Orchestrator {
+	o.transcriptBus = bus
+	return o
+}
+
+// TranscriptBus returns the registered bus, or nil if unset. Used by the
+// web handler to wire WebSocket subscribers.
+func (o *Orchestrator) TranscriptBus() *transcript.Bus { return o.transcriptBus }
+
 // New returns an Orchestrator wired with the provided dependencies.
 func New(
 	cfg config.Config,
@@ -112,7 +193,7 @@ func New(
 	ws *workspace.Manager,
 	log *observability.Logger,
 ) *Orchestrator {
-	return &Orchestrator{
+	o := &Orchestrator{
 		cfg:           cfg,
 		tracker:       t,
 		runtime:       rt,
@@ -124,6 +205,25 @@ func New(
 		pullRequests:  make(map[string]domain.PullRequest),
 		refreshC:      make(chan struct{}, 1),
 	}
+	// Build per-role runtimes when pipeline mode is configured. Errors are
+	// logged but not fatal — the dispatch path falls back to the single
+	// runtime if a role's runtime cannot be constructed (e.g. missing
+	// codex command). Operators see the error in startup logs.
+	if len(cfg.Agent.Pipeline) > 0 {
+		o.roleRuntimes = make(map[string]agent.Runtime, len(cfg.Agent.Pipeline))
+		for _, role := range cfg.Agent.Pipeline {
+			r, err := agent.NewForRole(cfg, role)
+			if err != nil {
+				log.Warn("pipeline: NewForRole failed; role disabled",
+					"role", role.Role,
+					"err", err.Error(),
+				)
+				continue
+			}
+			o.roleRuntimes[role.Role] = r
+		}
+	}
+	return o
 }
 
 // PullRequests returns a copy of the orchestrator's known PR map keyed by
@@ -209,6 +309,7 @@ func (o *Orchestrator) WithUpdateCallback(cb func()) *Orchestrator {
 func (o *Orchestrator) notify() {
 	o.mu.Lock()
 	cb := o.onUpdate
+	o.dirty = true
 	o.mu.Unlock()
 	if cb != nil {
 		cb()
@@ -270,6 +371,24 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Store the orchestrator-level context so scheduleRetry can use it even
 	// after a per-issue dispatch context has been cancelled.
 	o.rootCtx = ctx
+
+	// Load durable state before anything else; if the on-disk file is
+	// corrupt we'd rather fail fast than start with mismatched state.
+	if err := o.loadDurable(); err != nil {
+		return fmt.Errorf("durable load: %w", err)
+	}
+
+	// Release the durable directory lock when Run() returns so a
+	// subsequent symphony invocation can acquire it.
+	if o.durable != nil {
+		defer func() { _ = o.durable.Close() }()
+	}
+
+	// Start the durable persister in the background so notify() writes are
+	// reflected on disk without blocking the poll loop.
+	if o.durable != nil {
+		go o.runDurablePersister(ctx)
+	}
 
 	// Perform one-shot startup cleanup before the first poll tick per SPEC §8.6.
 	o.startupCleanup(ctx)

@@ -65,6 +65,7 @@ func fixedSnapshot(t *testing.T) observability.Snapshot {
 					InputTokens:  500,
 					OutputTokens: 300,
 				},
+				RunState: "running",
 			},
 			{
 				IssueID:         "issue-2",
@@ -83,6 +84,7 @@ func fixedSnapshot(t *testing.T) observability.Snapshot {
 					InputTokens:  400,
 					OutputTokens: 300,
 				},
+				RunState: "running",
 			},
 		},
 		Retrying: []observability.RetryEntry{

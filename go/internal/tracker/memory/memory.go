@@ -5,12 +5,15 @@ package memory
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/durable"
 )
 
 // Comment records a CreateComment call.
@@ -40,8 +43,27 @@ type MemoryTracker struct {
 	nextID int
 
 	// specs is an in-process map of identifier -> OpenSpec body. Used by
-	// SpecReader / SpecWriter; lost on restart by design.
+	// SpecReader / SpecWriter; lost on restart unless a durable store is
+	// attached.
 	specs map[string]string
+
+	// durable, when non-nil, persists issues + specs to disk on every
+	// mutating call and is consulted on construction (preferring on-disk
+	// state over the constructor seed).
+	durable *durable.Store
+}
+
+// memoryDurableIssues is the wire shape persisted under
+// "trackers/memory_issues".
+type memoryDurableIssues struct {
+	Issues []domain.Issue `json:"issues"`
+	NextID int            `json:"next_id"`
+}
+
+// memoryDurableSpecs is the wire shape persisted under
+// "trackers/memory_specs".
+type memoryDurableSpecs struct {
+	Specs map[string]string `json:"specs"`
 }
 
 // New creates a new MemoryTracker seeded with the given issues.
@@ -54,6 +76,71 @@ func New(seed []domain.Issue) *MemoryTracker {
 		TerminalStates: []string{"done", "closed", "cancelled", "canceled", "duplicate"},
 		specs:          make(map[string]string),
 	}
+}
+
+// NewWithDurable returns a MemoryTracker that mirrors issues + specs to s.
+// On construction, an on-disk snapshot takes precedence over seed; when
+// the snapshot is missing, seed is used as the initial state.
+func NewWithDurable(seed []domain.Issue, s *durable.Store) (*MemoryTracker, error) {
+	t := New(seed)
+	t.durable = s
+	if s == nil {
+		return t, nil
+	}
+
+	var iss memoryDurableIssues
+	err := s.Load("trackers/memory_issues", &iss)
+	switch {
+	case err == nil:
+		t.issues = iss.Issues
+		t.nextID = iss.NextID
+	case errors.Is(err, os.ErrNotExist):
+		// fresh install; keep seed
+	default:
+		return nil, fmt.Errorf("memory: load issues: %w", err)
+	}
+
+	var sp memoryDurableSpecs
+	err = s.Load("trackers/memory_specs", &sp)
+	switch {
+	case err == nil:
+		if sp.Specs != nil {
+			t.specs = sp.Specs
+		}
+	case errors.Is(err, os.ErrNotExist):
+		// fresh install
+	default:
+		return nil, fmt.Errorf("memory: load specs: %w", err)
+	}
+
+	return t, nil
+}
+
+// saveIssues persists the issues slice. Caller must hold t.mu (read OR write).
+// Errors are logged via the durable store's caller, not propagated, to match
+// the best-effort policy of the durable layer.
+func (t *MemoryTracker) saveIssues() {
+	if t.durable == nil {
+		return
+	}
+	// Snapshot under lock-free copy semantics.
+	issuesCopy := make([]domain.Issue, len(t.issues))
+	copy(issuesCopy, t.issues)
+	_ = t.durable.Save("trackers/memory_issues", memoryDurableIssues{ //nolint:errcheck
+		Issues: issuesCopy,
+		NextID: t.nextID,
+	})
+}
+
+func (t *MemoryTracker) saveSpecs() {
+	if t.durable == nil {
+		return
+	}
+	specsCopy := make(map[string]string, len(t.specs))
+	for k, v := range t.specs {
+		specsCopy[k] = v
+	}
+	_ = t.durable.Save("trackers/memory_specs", memoryDurableSpecs{Specs: specsCopy}) //nolint:errcheck
 }
 
 // Seed adds issues to the tracker (useful for test setup).
@@ -146,6 +233,7 @@ func (t *MemoryTracker) UpdateIssueState(_ context.Context, issueID, state strin
 	for i := range t.issues {
 		if t.issues[i].ID == issueID {
 			t.issues[i].State = state
+			t.saveIssues()
 			return nil
 		}
 	}
@@ -187,6 +275,7 @@ func (t *MemoryTracker) CreateIssue(_ context.Context, draft domain.IssueDraft) 
 		UpdatedAt:   &now,
 	}
 	t.issues = append(t.issues, issue)
+	t.saveIssues()
 	return issue, nil
 }
 
@@ -215,6 +304,7 @@ func (t *MemoryTracker) SetPullRequest(_ context.Context, identifier string, pr 
 		if t.issues[i].Identifier == identifier {
 			cp := pr
 			t.issues[i].PR = &cp
+			t.saveIssues()
 			return nil
 		}
 	}
@@ -244,6 +334,7 @@ func (t *MemoryTracker) WriteSpec(_ context.Context, identifier, body, ifMatchEt
 		}
 	}
 	t.specs[identifier] = body
+	t.saveSpecs()
 	return etagFor(body), nil
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/durable"
 	"github.com/openai/symphony/go/internal/tracker/jira"
 	"github.com/openai/symphony/go/internal/tracker/linear"
 	"github.com/openai/symphony/go/internal/tracker/markdown"
@@ -97,4 +98,14 @@ func NewWithSeed(cfg config.Config, seed []domain.Issue) (Tracker, error) {
 	default:
 		return nil, fmt.Errorf("unsupported tracker.kind: %s (will be added in a later phase)", cfg.Tracker.Kind)
 	}
+}
+
+// NewWithDurable returns a Tracker that mirrors mutating operations to s.
+// Only the memory tracker currently uses the durable store; other adapters
+// own their own persistence. Non-memory kinds fall through to New(cfg).
+func NewWithDurable(cfg config.Config, seed []domain.Issue, s *durable.Store) (Tracker, error) {
+	if cfg.Tracker.Kind == "memory" {
+		return memory.NewWithDurable(seed, s)
+	}
+	return New(cfg)
 }

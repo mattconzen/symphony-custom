@@ -28,11 +28,11 @@ func (f *fakeSource) RequestRefresh() bool {
 }
 
 func newTestHandler(snap observability.Snapshot) *Handler {
-	return newHandlerFromSource(&fakeSource{snap: snap, refreshQueued: true}, nil, nil)
+	return newHandlerFromSource(&fakeSource{snap: snap, refreshQueued: true}, nil, nil, nil, nil, nil)
 }
 
 func newTestHandlerWithRoot(snap observability.Snapshot, root string) *Handler {
-	return newHandlerFromSource(&fakeSource{snap: snap, workspaceRoot: root, refreshQueued: true}, nil, nil)
+	return newHandlerFromSource(&fakeSource{snap: snap, workspaceRoot: root, refreshQueued: true}, nil, nil, nil, nil, nil)
 }
 
 func TestHandleDashboard_RendersOK(t *testing.T) {

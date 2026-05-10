@@ -16,6 +16,7 @@ import (
 	"github.com/openai/symphony/go/internal/domain"
 	"github.com/openai/symphony/go/internal/observability"
 	"github.com/openai/symphony/go/internal/orchestrator"
+	"github.com/openai/symphony/go/internal/transcript"
 )
 
 // dashboardView is the render context for dashboard.html.tmpl. It embeds the
@@ -25,6 +26,14 @@ type dashboardView struct {
 	observability.Snapshot
 	Error          *dashboardError
 	CanCreateIssue bool
+}
+
+// issuePageView is the render context for issue.html.tmpl. The embedded
+// issuePayload exposes the JSON-equivalent fields the template walks; the
+// Transcript slice is server-side seeded from the per-issue JSONL file.
+type issuePageView struct {
+	issuePayload
+	Transcript []transcript.Event
 }
 
 type dashboardError struct {
@@ -41,6 +50,22 @@ type snapshotSource interface {
 	RequestRefresh() bool
 }
 
+// transcriptSource exposes the orchestrator helper that maps an issue
+// identifier to the on-disk transcript file. Implementations also return
+// the live bus (when set).
+type transcriptSource interface {
+	TranscriptPathForIdentifier(identifier string) string
+}
+
+// pauseSource is the subset of *orchestrator.Orchestrator that the
+// Pause/Resume/Cancel handlers depend on. Tests inject a fake.
+type pauseSource interface {
+	RequestPause(identifier string) error
+	Resume(identifier string) error
+	RequestCancel(identifier string) error
+	RunStateOf(identifier string) (string, bool)
+}
+
 // trackerSource is the subset of tracker.Tracker that the write handlers
 // (POST /api/v1/issues, PUT /api/v1/issues/{id}/spec, etc.) need. It is
 // extracted so tests can supply lightweight fakes.
@@ -52,12 +77,15 @@ type trackerSource interface {
 // Handler bundles the dashboard's HTTP surface area. Construct it via
 // NewHandler and mount the returned http.Handler on an http.Server.
 type Handler struct {
-	orch      snapshotSource
-	trk       trackerSource
-	specGen   SpecGenerator
-	tmpl      *template.Template
-	mux       *http.ServeMux
-	broadcast *broadcaster
+	orch          snapshotSource
+	pauseCtl      pauseSource
+	transcriptCtl transcriptSource
+	transcriptBus *transcript.Bus
+	trk           trackerSource
+	specGen       SpecGenerator
+	tmpl          *template.Template
+	mux           *http.ServeMux
+	broadcast     *broadcaster
 
 	// specJobs tracks in-flight or completed spec-generation jobs.
 	specJobsMu sync.Mutex
@@ -78,7 +106,7 @@ type Handler struct {
 // theirs around the broadcaster (or call WithUpdateCallback after
 // NewHandler returns, which will silently disable WS streaming).
 func NewHandler(orch *orchestrator.Orchestrator) http.Handler {
-	h := newHandlerFromSource(orch, nil, nil)
+	h := newHandlerFromSource(orch, orch, orch, orch.TranscriptBus(), nil, nil)
 	orch.WithUpdateCallback(h.broadcast.broadcast)
 	return h
 }
@@ -87,12 +115,19 @@ func NewHandler(orch *orchestrator.Orchestrator) http.Handler {
 // specGen are optional; when nil, the corresponding write endpoints
 // respond with 405 unsupported.
 func NewHandlerWithDeps(orch *orchestrator.Orchestrator, trk trackerSource, specGen SpecGenerator) http.Handler {
-	h := newHandlerFromSource(orch, trk, specGen)
+	h := newHandlerFromSource(orch, orch, orch, orch.TranscriptBus(), trk, specGen)
 	orch.WithUpdateCallback(h.broadcast.broadcast)
 	return h
 }
 
-func newHandlerFromSource(orch snapshotSource, trk trackerSource, specGen SpecGenerator) *Handler {
+func newHandlerFromSource(
+	orch snapshotSource,
+	pauseCtl pauseSource,
+	transcriptCtl transcriptSource,
+	transcriptBus *transcript.Bus,
+	trk trackerSource,
+	specGen SpecGenerator,
+) *Handler {
 	tmpl := template.Must(
 		template.New("dashboard").
 			Funcs(Funcs()).
@@ -100,13 +135,16 @@ func newHandlerFromSource(orch snapshotSource, trk trackerSource, specGen SpecGe
 	)
 
 	h := &Handler{
-		orch:      orch,
-		trk:       trk,
-		specGen:   specGen,
-		tmpl:      tmpl,
-		mux:       http.NewServeMux(),
-		broadcast: newBroadcaster(),
-		specJobs:  make(map[string]*specJob),
+		orch:          orch,
+		pauseCtl:      pauseCtl,
+		transcriptCtl: transcriptCtl,
+		transcriptBus: transcriptBus,
+		trk:           trk,
+		specGen:       specGen,
+		tmpl:          tmpl,
+		mux:           http.NewServeMux(),
+		broadcast:     newBroadcaster(),
+		specJobs:      make(map[string]*specJob),
 	}
 	h.routes()
 	return h
@@ -149,6 +187,18 @@ func (h *Handler) routes() {
 	}))
 	h.mux.HandleFunc("/api/v1/issues/{issue_identifier}/spec/generate/{job_id}", h.dispatchByMethod(map[string]http.HandlerFunc{
 		http.MethodGet: h.handleAPIGenerateSpecStatus,
+	}))
+	h.mux.HandleFunc("/api/v1/issues/{issue_identifier}/pause", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodPost: h.handleAPIPause,
+	}))
+	h.mux.HandleFunc("/api/v1/issues/{issue_identifier}/resume", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodPost: h.handleAPIResume,
+	}))
+	h.mux.HandleFunc("/api/v1/issues/{issue_identifier}/cancel", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodPost: h.handleAPICancel,
+	}))
+	h.mux.HandleFunc("/api/v1/issues/{issue_identifier}/transcript", h.dispatchByMethod(map[string]http.HandlerFunc{
+		http.MethodGet: h.handleAPITranscript,
 	}))
 }
 
@@ -246,6 +296,17 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP symphony_polling_interval_ms Configured polling interval in milliseconds.")
 	fmt.Fprintln(w, "# TYPE symphony_polling_interval_ms gauge")
 	fmt.Fprintf(w, "symphony_polling_interval_ms %d\n", snap.Polling.PollIntervalMs)
+
+	// Transcript bus drop totals (events the publisher dropped because a
+	// subscriber's buffer was full). Emitted as a counter keyed by issue
+	// identifier.
+	if h.transcriptBus != nil {
+		fmt.Fprintln(w, "# HELP symphony_transcript_bus_drops_total Transcript events dropped because a subscriber buffer was full.")
+		fmt.Fprintln(w, "# TYPE symphony_transcript_bus_drops_total counter")
+		for id, n := range h.transcriptBus.Snapshot() {
+			fmt.Fprintf(w, "symphony_transcript_bus_drops_total{subscriber=%q} %d\n", id, n)
+		}
+	}
 }
 
 // handleIssuePage renders templates/issue.html.tmpl for the requested
@@ -270,8 +331,19 @@ func (h *Handler) handleIssuePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Server-side seed the transcript section with the last 200 events.
+	view := issuePageView{issuePayload: payload}
+	if h.transcriptCtl != nil {
+		path := h.transcriptCtl.TranscriptPathForIdentifier(id)
+		if path != "" {
+			if events, err := transcript.Tail(path, 200); err == nil {
+				view.Transcript = events
+			}
+		}
+	}
+
 	var buf bytes.Buffer
-	if err := h.tmpl.ExecuteTemplate(&buf, "issue.html.tmpl", payload); err != nil {
+	if err := h.tmpl.ExecuteTemplate(&buf, "issue.html.tmpl", view); err != nil {
 		http.Error(w, "template execute: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
