@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +52,11 @@ func (o *Orchestrator) dispatchPipeline(ctx context.Context, issue domain.Issue)
 		return
 	}
 
+	// Load any durable pipeline progress from a prior dispatch so we can
+	// resume at the recorded role with the loopback counters preserved
+	// across the releaseClaim → scheduleRetry → re-dispatch cycle (T4).
+	loaded := o.loadPipelineProgress(issue.ID)
+
 	o.mu.Lock()
 	if entry, ok := o.running[issue.ID]; ok {
 		entry.workspacePath = ws.Path
@@ -58,6 +64,25 @@ func (o *Orchestrator) dispatchPipeline(ctx context.Context, issue domain.Issue)
 			entry.pipeline = &domain.PipelineProgress{
 				Loopbacks: make(map[string]int),
 				Artifacts: make(map[string]string),
+			}
+		}
+		if loaded != nil {
+			// Overlay durable progress onto the freshly-created entry.
+			if loaded.CurrentRole != "" {
+				entry.pipeline.CurrentRole = loaded.CurrentRole
+			}
+			if len(loaded.CompletedRoles) > 0 {
+				entry.pipeline.CompletedRoles = append([]string(nil), loaded.CompletedRoles...)
+			}
+			if len(loaded.Loopbacks) > 0 {
+				for k, v := range loaded.Loopbacks {
+					entry.pipeline.Loopbacks[k] = v
+				}
+			}
+			if len(loaded.Artifacts) > 0 {
+				for k, v := range loaded.Artifacts {
+					entry.pipeline.Artifacts[k] = v
+				}
 			}
 		}
 	}
@@ -119,13 +144,28 @@ func (o *Orchestrator) dispatchPipeline(ctx context.Context, issue domain.Issue)
 			}
 			log.Info("pipeline: loopback fired", "from", role.Role, "to", target.RetryFrom)
 			idx = loopIdx
+			// Honour pause/cancel between roles even on loopback (T3).
+			if cancelled := o.observePauseOrCancel(ctx, issue.ID, log, 0); cancelled {
+				return
+			}
 			continue
 		}
 
 		idx++
+		// Pause/Cancel observation between roles (T3). Pause in pipeline
+		// mode is "between roles" by analogy with the single-role "between
+		// turns" semantics. Block while paused; return on cancel.
+		if idx < len(roles) {
+			if cancelled := o.observePauseOrCancel(ctx, issue.ID, log, 0); cancelled {
+				return
+			}
+		}
 	}
 
 	log.Info("pipeline: all roles complete")
+	// Clear the durable progress record on terminal completion (T4) so a
+	// re-dispatch of the same issue starts from role 0.
+	o.clearPipelineProgress(issue.ID)
 }
 
 // runPipelineRole runs the existing turn-loop for one role. Returns
@@ -246,23 +286,32 @@ func (o *Orchestrator) detectLoopback(ws domain.Workspace, role config.PipelineR
 
 // bumpLoopback increments the loopback counter for target and returns
 // false if max_loopbacks would be exceeded.
+//
+// T21: max_loopbacks=0 now means "no loopbacks allowed" (rejected at
+// preflight if negative). Treat any non-positive value as zero here so
+// the first attempt is refused — matches user expectation that 0
+// disables loopbacks rather than silently coercing to 1.
 func (o *Orchestrator) bumpLoopback(issueID, target string, max int) bool {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	entry, ok := o.running[issueID]
 	if !ok || entry.pipeline == nil {
+		o.mu.Unlock()
 		return false
 	}
 	if entry.pipeline.Loopbacks == nil {
 		entry.pipeline.Loopbacks = make(map[string]int)
 	}
-	if max <= 0 {
-		max = 1
+	if max < 0 {
+		max = 0
 	}
 	if entry.pipeline.Loopbacks[target] >= max {
+		o.mu.Unlock()
 		return false
 	}
 	entry.pipeline.Loopbacks[target]++
+	snapshot := clonePipelineProgress(entry.pipeline)
+	o.mu.Unlock()
+	o.persistPipelineProgress(issueID, snapshot)
 	return true
 }
 
@@ -289,22 +338,27 @@ func (o *Orchestrator) recordPipelineProgress(issueID, currentRole string, compl
 			entry.pipeline.CompletedRoles = append(entry.pipeline.CompletedRoles, completed.Role)
 		}
 	}
+	snapshot := clonePipelineProgress(entry.pipeline)
 	o.mu.Unlock()
+	o.persistPipelineProgress(issueID, snapshot)
 	o.notify()
 }
 
 // recordArtifact stores the absolute artifact path for the named role.
 func (o *Orchestrator) recordArtifact(issueID, role, path string) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	entry, ok := o.running[issueID]
 	if !ok || entry.pipeline == nil {
+		o.mu.Unlock()
 		return
 	}
 	if entry.pipeline.Artifacts == nil {
 		entry.pipeline.Artifacts = make(map[string]string)
 	}
 	entry.pipeline.Artifacts[role] = path
+	snapshot := clonePipelineProgress(entry.pipeline)
+	o.mu.Unlock()
+	o.persistPipelineProgress(issueID, snapshot)
 }
 
 // collectPriorArtifacts reads each previously-completed role's artifact
@@ -364,4 +418,85 @@ func findRoleIndex(roles []config.PipelineRole, name string) int {
 		}
 	}
 	return -1
+}
+
+// pipelineProgressKey returns the durable.Store name for one issue's
+// pipeline progress record. Slash-delimited so files sit under a
+// "pipeline_progress/" subdirectory.
+func pipelineProgressKey(issueID string) string {
+	return "pipeline_progress/" + issueID
+}
+
+// loadPipelineProgress reads the on-disk pipeline progress for issueID
+// (T4). Returns nil when durable is disabled, when the file is missing,
+// or on read error. Errors are logged at warn level; the caller falls
+// back to today's per-dispatch behaviour.
+func (o *Orchestrator) loadPipelineProgress(issueID string) *domain.PipelineProgress {
+	if o.durable == nil {
+		return nil
+	}
+	var p domain.PipelineProgress
+	err := o.durable.Load(pipelineProgressKey(issueID), &p)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			o.log.Warn("pipeline progress load failed", "issue_id", issueID, "err", err.Error())
+		}
+		return nil
+	}
+	return &p
+}
+
+// persistPipelineProgress writes the snapshot to durable storage (T4).
+// When durable is disabled or save fails, the call is best-effort: the
+// in-memory entry continues to drive the run. A single info log notes
+// the disabled case once per dispatch.
+func (o *Orchestrator) persistPipelineProgress(issueID string, p *domain.PipelineProgress) {
+	if o.durable == nil {
+		// Match the brief documented in T4: log once per call site is
+		// noisy; emit at debug level only to keep logs clean.
+		o.log.Debug("pipeline progress not durable: durable disabled", "issue_id", issueID)
+		return
+	}
+	if p == nil {
+		return
+	}
+	if err := o.durable.Save(pipelineProgressKey(issueID), p); err != nil {
+		o.log.Warn("pipeline progress save failed", "issue_id", issueID, "err", err.Error())
+	}
+}
+
+// clearPipelineProgress deletes the durable record for issueID (T4).
+// Called on terminal pipeline completion. Best-effort.
+func (o *Orchestrator) clearPipelineProgress(issueID string) {
+	if o.durable == nil {
+		return
+	}
+	if err := o.durable.Delete(pipelineProgressKey(issueID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		o.log.Warn("pipeline progress delete failed", "issue_id", issueID, "err", err.Error())
+	}
+}
+
+// clonePipelineProgress deep-copies progress so callers can pass it
+// outside o.mu without later mutation interfering with persistence.
+func clonePipelineProgress(p *domain.PipelineProgress) *domain.PipelineProgress {
+	if p == nil {
+		return nil
+	}
+	out := &domain.PipelineProgress{
+		CurrentRole:    p.CurrentRole,
+		CompletedRoles: append([]string(nil), p.CompletedRoles...),
+	}
+	if p.Loopbacks != nil {
+		out.Loopbacks = make(map[string]int, len(p.Loopbacks))
+		for k, v := range p.Loopbacks {
+			out.Loopbacks[k] = v
+		}
+	}
+	if p.Artifacts != nil {
+		out.Artifacts = make(map[string]string, len(p.Artifacts))
+		for k, v := range p.Artifacts {
+			out.Artifacts[k] = v
+		}
+	}
+	return out
 }

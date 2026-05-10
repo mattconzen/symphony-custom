@@ -64,9 +64,12 @@ type runEntry struct {
 
 	// state and pauseCh implement the Pause/Resume/Cancel protocol. pauseCh
 	// is allocated lazily on the first Pause; the turn loop receives from
-	// it (blocking) until Resume closes it.
-	state   runState
-	pauseCh chan struct{}
+	// it (blocking) until Resume closes it. pauseClosed guards close(pauseCh)
+	// so Resume and RequestCancel racing for the same channel will close it
+	// exactly once (replaces the prior recover()-based safeClose).
+	state       runState
+	pauseCh     chan struct{}
+	pauseClosed bool
 
 	// pipeline tracks per-role progress when the issue runs under
 	// agent.pipeline. Nil for single-role dispatches.
@@ -373,6 +376,12 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// corrupt we'd rather fail fast than start with mismatched state.
 	if err := o.loadDurable(); err != nil {
 		return fmt.Errorf("durable load: %w", err)
+	}
+
+	// Release the durable directory lock when Run() returns so a
+	// subsequent symphony invocation can acquire it.
+	if o.durable != nil {
+		defer func() { _ = o.durable.Close() }()
 	}
 
 	// Start the durable persister in the background so notify() writes are

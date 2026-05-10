@@ -1,8 +1,12 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,6 +59,101 @@ func TestOrchestrator_DurableRoundTrip(t *testing.T) {
 	assert.Equal(t, "open", second.pullRequests["I-1"].State)
 	assert.Equal(t, 100, second.agentTotals.InputTokens)
 	assert.Equal(t, 50, second.agentTotals.OutputTokens)
+}
+
+// TestOrchestrator_DurableSaveErrLogRateLimited simulates 10 consecutive
+// save failures with the same error string and asserts the warn log fires
+// at most twice (initial + maybe a rotation under 30s would be zero, so
+// strictly: exactly one warn for the same error inside the window).
+func TestOrchestrator_DurableSaveErrLogRateLimited(t *testing.T) {
+	var buf bytes.Buffer
+	log := observability.New(&buf)
+	cfg := config.Config{
+		Tracker:   config.Tracker{Kind: "memory"},
+		Workspace: config.Workspace{Root: t.TempDir()},
+		Agent:     config.Agent{Runtime: "mock"},
+	}
+	trk := memory.New(nil)
+	wsmgr := workspace.NewManager(cfg)
+	rt := mock.New(mock.MockOpts{})
+	o := New(cfg, trk, rt, wsmgr, log)
+
+	ps := &durablePersisterState{}
+	sameErr := errors.New("disk: i/o error")
+	for i := 0; i < 10; i++ {
+		o.maybeLogSaveErr(ps, sameErr)
+	}
+
+	warns := countWarnsContaining(buf.String(), "save failed")
+	assert.LessOrEqual(t, warns, 2, "expected ≤2 warns over 10 same-error ticks, got %d", warns)
+	assert.GreaterOrEqual(t, warns, 1, "expected ≥1 warn so operators see the failure")
+}
+
+// TestOrchestrator_DurableSaveErrLogsNewErrorImmediately confirms a fresh
+// error string bypasses the rate limit so operators see new failure modes
+// even when an older one is still suppressed.
+func TestOrchestrator_DurableSaveErrLogsNewErrorImmediately(t *testing.T) {
+	var buf bytes.Buffer
+	log := observability.New(&buf)
+	cfg := config.Config{
+		Tracker:   config.Tracker{Kind: "memory"},
+		Workspace: config.Workspace{Root: t.TempDir()},
+		Agent:     config.Agent{Runtime: "mock"},
+	}
+	o := New(cfg, memory.New(nil), mock.New(mock.MockOpts{}), workspace.NewManager(cfg), log)
+
+	ps := &durablePersisterState{}
+	o.maybeLogSaveErr(ps, errors.New("disk: i/o error"))
+	o.maybeLogSaveErr(ps, errors.New("disk: i/o error"))      // rate-limited
+	o.maybeLogSaveErr(ps, errors.New("disk: read-only"))      // new error → log
+	o.maybeLogSaveErr(ps, errors.New("disk: read-only"))      // rate-limited
+
+	warns := countWarnsContaining(buf.String(), "save failed")
+	assert.Equal(t, 2, warns)
+}
+
+// TestOrchestrator_DurableSaveLogsRecoveryOnce verifies the "saves
+// recovered" Info log fires exactly once after a successful save that
+// follows one or more failures.
+func TestOrchestrator_DurableSaveLogsRecoveryOnce(t *testing.T) {
+	var buf bytes.Buffer
+	log := observability.New(&buf)
+
+	dir := t.TempDir()
+	store, err := durable.New(dir)
+	require.NoError(t, err)
+	defer store.Close()
+
+	cfg := config.Config{
+		Tracker:   config.Tracker{Kind: "memory"},
+		Workspace: config.Workspace{Root: t.TempDir()},
+		Agent:     config.Agent{Runtime: "mock"},
+	}
+	o := New(cfg, memory.New(nil), mock.New(mock.MockOpts{}), workspace.NewManager(cfg), log).
+		WithDurableStore(store)
+
+	ps := &durablePersisterState{}
+	// Simulate prior failure so hadError is set.
+	ps.hadError = true
+	ps.lastErrStr = "previous"
+	ps.lastErrLogAt = time.Now()
+
+	// A real successful save against the real store.
+	o.saveDurableWithState(ps)
+
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(out, "durable: orchestrator saves recovered"))
+	assert.False(t, ps.hadError, "hadError flag should reset after recovery")
+}
+
+func countWarnsContaining(out, substr string) int {
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, `"level":"WARN"`) && strings.Contains(line, substr) {
+			count++
+		}
+	}
+	return count
 }
 
 func TestOrchestrator_DurableNilStoreIsNoOp(t *testing.T) {

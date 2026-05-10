@@ -5,12 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
+
+// readMaxBytes caps the byte stream returned by readTool. Exposed as a var
+// (rather than a const) so tests can lower it to exercise truncation.
+var readMaxBytes = 256 * 1024
 
 // resolveInWorkspace joins a relative or absolute path with the workspace
 // root and rejects any path that escapes it. The model is expected to pass
@@ -66,12 +72,19 @@ func (readTool) Run(_ context.Context, workspacePath string, input json.RawMessa
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(abs) //nolint:gosec
+	f, err := os.Open(abs) //nolint:gosec
 	if err != nil {
 		return "", fmt.Errorf("read: %w", err)
 	}
-	if len(data) > 256*1024 {
-		return string(data[:256*1024]) + "\n…[truncated]\n", nil
+	defer f.Close() //nolint:errcheck
+	// Read one byte past the cap so we can detect overflow without loading the
+	// whole file into memory. Multi-GB files would OOM os.ReadFile.
+	data, err := io.ReadAll(io.LimitReader(f, int64(readMaxBytes)+1))
+	if err != nil {
+		return "", fmt.Errorf("read: %w", err)
+	}
+	if len(data) > readMaxBytes {
+		return string(data[:readMaxBytes]) + "\n…[truncated]\n", nil
 	}
 	return string(data), nil
 }
@@ -217,8 +230,7 @@ func (globTool) Run(_ context.Context, workspacePath string, input json.RawMessa
 	if in.Pattern == "" {
 		return "", fmt.Errorf("glob: pattern is required")
 	}
-	pattern := in.Pattern
-	doubleStar := strings.Contains(pattern, "**")
+	pattern := filepath.ToSlash(in.Pattern)
 
 	var matches []string
 	err := filepath.WalkDir(workspacePath, func(p string, d fs.DirEntry, err error) error {
@@ -234,21 +246,12 @@ func (globTool) Run(_ context.Context, workspacePath string, input json.RawMessa
 			return nil
 		}
 		rel, _ := filepath.Rel(workspacePath, p)
-		if doubleStar {
-			// Strip the **/ prefix or suffix and match on the base if present.
-			plainPattern := strings.ReplaceAll(pattern, "**/", "")
-			plainPattern = strings.ReplaceAll(plainPattern, "**", "*")
-			if ok, _ := filepath.Match(plainPattern, filepath.Base(rel)); ok {
-				matches = append(matches, rel)
-			} else if ok, _ := filepath.Match(plainPattern, rel); ok {
-				matches = append(matches, rel)
-			}
-		} else {
-			if ok, _ := filepath.Match(pattern, rel); ok {
-				matches = append(matches, rel)
-			} else if ok, _ := filepath.Match(pattern, filepath.Base(rel)); ok {
-				matches = append(matches, rel)
-			}
+		relSlash := filepath.ToSlash(rel)
+		if doublestarMatch(pattern, relSlash) {
+			matches = append(matches, rel)
+		} else if ok, _ := filepath.Match(pattern, filepath.Base(rel)); ok && !strings.Contains(pattern, "/") {
+			// Plain basename match when the pattern has no path separator.
+			matches = append(matches, rel)
 		}
 		return nil
 	})
@@ -263,6 +266,72 @@ func (globTool) Run(_ context.Context, workspacePath string, input json.RawMessa
 		matches = append(matches, "…[truncated]")
 	}
 	return strings.Join(matches, "\n"), nil
+}
+
+// clipRunes returns s clipped to at most maxRunes runes, appending an ellipsis
+// when truncation occurred. The rune-aware slice keeps the returned string
+// valid UTF-8 even when the cut would have split a multibyte sequence.
+func clipRunes(s string, maxRunes int) string {
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	count := 0
+	for i := range s {
+		if count == maxRunes {
+			return s[:i] + "…"
+		}
+		count++
+	}
+	return s
+}
+
+// doublestarMatch reports whether `name` matches `pattern`, where `**` matches
+// zero or more path components, `*` matches anything except `/`, and `?`
+// matches one non-`/` byte. Equivalent to github.com/bmatcuk/doublestar/v4
+// for the subset of patterns globTool exposes.
+func doublestarMatch(pattern, name string) bool {
+	patParts := splitPath(pattern)
+	nameParts := splitPath(name)
+	return matchParts(patParts, nameParts)
+}
+
+func splitPath(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "/")
+}
+
+func matchParts(pat, name []string) bool {
+	for len(pat) > 0 {
+		if pat[0] == "**" {
+			// Trim consecutive ** to avoid exponential branching.
+			for len(pat) > 1 && pat[1] == "**" {
+				pat = pat[1:]
+			}
+			if len(pat) == 1 {
+				// Trailing **: matches any remaining components, including none.
+				return true
+			}
+			// Try matching the remainder against every suffix of name.
+			for i := 0; i <= len(name); i++ {
+				if matchParts(pat[1:], name[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(name) == 0 {
+			return false
+		}
+		ok, _ := filepath.Match(pat[0], name[0])
+		if !ok {
+			return false
+		}
+		pat = pat[1:]
+		name = name[1:]
+	}
+	return len(name) == 0
 }
 
 // grepTool searches file contents with a regex. Implementation reads each
@@ -337,9 +406,7 @@ func (grepTool) Run(_ context.Context, workspacePath string, input json.RawMessa
 			ln++
 			line := scanner.Text()
 			if re.MatchString(line) {
-				if len(line) > 200 {
-					line = line[:200] + "…"
-				}
+				line = clipRunes(line, 200)
 				hits = append(hits, fmt.Sprintf("%s:%d:%s", rel, ln, line))
 				if len(hits) >= 500 {
 					return filepath.SkipAll

@@ -95,20 +95,39 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
 		log.Warn("stop session error (ignored)", "err", fmt.Sprintf("%v", stopErr))
 	}
 
-	// after_run hook — always fires; failures logged-and-ignored per SPEC §9.4.
+	// after_run hook — fires only when the run was not cancelled (T19).
+	// Cancellation is detected either via the per-issue context being
+	// done while runState is cancel_requested, or via the operator-level
+	// cancelRequested check. Skipping avoids running long PR-creation
+	// or notify scripts against partial state.
+	cancelled := o.cancelRequested(issue.ID) || (ctx.Err() == context.Canceled && o.cancelRequested(issue.ID))
 	if o.cfg.Hooks.AfterRun != "" {
-		timeout := time.Duration(o.cfg.Hooks.TimeoutMs) * time.Millisecond
-		result, hookErr := o.ws.RunHook(context.Background(), ws, o.cfg.Hooks.AfterRun, timeout)
-		if hookErr != nil || result.ExitCode != 0 || result.TimedOut {
-			log.Warn("after_run hook failed (ignored)",
-				"exit_code", result.ExitCode,
-				"timed_out", result.TimedOut,
-			)
+		if cancelled {
+			log.Info("after_run skipped: run cancelled")
+		} else {
+			timeout := time.Duration(o.cfg.Hooks.TimeoutMs) * time.Millisecond
+			result, hookErr := o.ws.RunHook(context.Background(), ws, o.cfg.Hooks.AfterRun, timeout)
+			if hookErr != nil || result.ExitCode != 0 || result.TimedOut {
+				log.Warn("after_run hook failed (ignored)",
+					"exit_code", result.ExitCode,
+					"timed_out", result.TimedOut,
+				)
+			}
 		}
 	}
 
 	if runErr != nil && ctx.Err() == nil && !o.cancelRequested(issue.ID) {
 		o.scheduleRetry(issue, runErr)
+	}
+
+	// T20: defence-in-depth — if RequestCancel arrived too late to clean
+	// up (race against the dispatch loop returning), do the cleanup here
+	// before releaseClaim drops the entry. RequestCancel itself already
+	// cleans up synchronously; this only fires when the dispatch path
+	// detected ctx cancellation but the cancelRequested check came after
+	// the operator's RequestCancel call.
+	if cancelled {
+		o.cleanupCancelledWorkspace(ws.Path)
 	}
 }
 

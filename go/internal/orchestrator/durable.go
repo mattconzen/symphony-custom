@@ -68,11 +68,30 @@ func (o *Orchestrator) loadDurable() error {
 	return nil
 }
 
+// durablePersisterState tracks the rate-limit metadata for save-failure
+// warnings so a stuck disk doesn't spam the log every 200ms. Fields are
+// only touched by runDurablePersister / saveDurable on the same goroutine,
+// so no separate lock is required.
+type durablePersisterState struct {
+	lastErrLogAt time.Time
+	lastErrStr   string
+	hadError     bool
+}
+
+// durableErrLogInterval is the minimum wall-clock gap between two
+// identical-error warn logs. New error strings always log immediately.
+const durableErrLogInterval = 30 * time.Second
+
 // saveDurable snapshots state and writes it under "orchestrator". Best-
 // effort: errors are logged and the run continues. The dirty flag is
 // cleared only on success so a transient write failure retries on the
-// next debounce tick.
+// next debounce tick. The optional ps argument provides log rate-limit
+// state; pass nil to log every failure (used by the one-shot final save).
 func (o *Orchestrator) saveDurable() {
+	o.saveDurableWithState(nil)
+}
+
+func (o *Orchestrator) saveDurableWithState(ps *durablePersisterState) {
 	if o.durable == nil {
 		return
 	}
@@ -92,12 +111,39 @@ func (o *Orchestrator) saveDurable() {
 	o.mu.Unlock()
 
 	if err := o.durable.Save("orchestrator", state); err != nil {
-		o.log.Warn("durable: orchestrator save failed", "err", err.Error())
+		o.maybeLogSaveErr(ps, err)
 		return
+	}
+	if ps != nil && ps.hadError {
+		o.log.Info("durable: orchestrator saves recovered")
+		ps.hadError = false
+		ps.lastErrStr = ""
+		ps.lastErrLogAt = time.Time{}
 	}
 	o.mu.Lock()
 	o.dirty = false
 	o.mu.Unlock()
+}
+
+// maybeLogSaveErr emits a warn log for the given save error, rate-limited
+// per durableErrLogInterval and gated on error-string change so a stuck
+// disk doesn't flood logs every 200ms tick. When ps is nil the error is
+// always logged (used by callers that don't maintain rate-limit state).
+func (o *Orchestrator) maybeLogSaveErr(ps *durablePersisterState, err error) {
+	msg := err.Error()
+	if ps == nil {
+		o.log.Warn("durable: orchestrator save failed", "err", msg)
+		return
+	}
+	now := time.Now()
+	changed := msg != ps.lastErrStr
+	stale := ps.lastErrLogAt.IsZero() || now.Sub(ps.lastErrLogAt) >= durableErrLogInterval
+	if changed || stale {
+		o.log.Warn("durable: orchestrator save failed", "err", msg)
+		ps.lastErrLogAt = now
+		ps.lastErrStr = msg
+	}
+	ps.hadError = true
 }
 
 // runDurablePersister is a background goroutine that watches the dirty
@@ -111,17 +157,19 @@ func (o *Orchestrator) runDurablePersister(ctx context.Context) {
 	ticker := time.NewTicker(debounce)
 	defer ticker.Stop()
 
+	ps := &durablePersisterState{}
+
 	for {
 		select {
 		case <-ctx.Done():
-			o.saveDurable()
+			o.saveDurableWithState(ps)
 			return
 		case <-ticker.C:
 			o.mu.Lock()
 			dirty := o.dirty
 			o.mu.Unlock()
 			if dirty {
-				o.saveDurable()
+				o.saveDurableWithState(ps)
 			}
 		}
 	}

@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 )
 
 // Sentinel errors returned by the pause/resume/cancel control methods.
@@ -40,8 +42,11 @@ func (o *Orchestrator) RequestPause(identifier string) error {
 	if entry.state == runStateRunning {
 		entry.state = runStatePauseRequested
 		// Re-create the pause channel for each pause cycle so a fresh
-		// Resume close is always observable.
+		// Resume close is always observable. Reset pauseClosed so the
+		// new channel can be closed exactly once on the next Resume/
+		// Cancel.
 		entry.pauseCh = make(chan struct{})
+		entry.pauseClosed = false
 	}
 	o.mu.Unlock()
 	o.notify()
@@ -63,14 +68,19 @@ func (o *Orchestrator) Resume(identifier string) error {
 		return ErrNotPaused
 	}
 	ch := entry.pauseCh
+	shouldClose := ch != nil && !entry.pauseClosed
+	if shouldClose {
+		entry.pauseClosed = true
+	}
 	entry.state = runStateRunning
 	entry.pauseCh = nil
 	o.mu.Unlock()
 
-	if ch != nil {
+	if shouldClose {
 		// Close outside the lock so the receiver can re-enter the
-		// orchestrator without deadlock.
-		safeClose(ch)
+		// orchestrator without deadlock. The pauseClosed guard set
+		// above (under o.mu) ensures we never double-close.
+		close(ch)
 	}
 	o.notify()
 	return nil
@@ -88,17 +98,28 @@ func (o *Orchestrator) RequestCancel(identifier string) error {
 	entry.state = runStateCancelRequested
 	cancel := entry.cancel
 	// If the entry is currently sitting in a pause, wake it so the
-	// turn-loop returns and observes cancel state.
+	// turn-loop returns and observes cancel state. The pauseClosed
+	// flag (under o.mu) ensures the close fires at most once even
+	// if Resume/RequestCancel race.
 	pauseCh := entry.pauseCh
+	shouldClose := pauseCh != nil && !entry.pauseClosed
+	if shouldClose {
+		entry.pauseClosed = true
+	}
 	entry.pauseCh = nil
+	workspacePath := entry.workspacePath
 	o.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
-	if pauseCh != nil {
-		safeClose(pauseCh)
+	if shouldClose {
+		close(pauseCh)
 	}
+	// Best-effort cleanup of pipeline-progress files inside .symphony/
+	// so a follow-up dispatch starts from a clean slate (T20). The
+	// workspace dir and its git tree are preserved.
+	o.cleanupCancelledWorkspace(workspacePath)
 	o.notify()
 	return nil
 }
@@ -115,10 +136,20 @@ func (o *Orchestrator) RunStateOf(identifier string) (string, bool) {
 	return entry.state.String(), true
 }
 
-// safeClose closes the channel exactly once. A second close would panic,
-// so we recover defensively in case the dispatch loop and an
-// orchestrator-side Resume race for the close.
-func safeClose(ch chan struct{}) {
-	defer func() { _ = recover() }()
-	close(ch)
+// cleanupCancelledWorkspace removes pipeline-progress files written by
+// dispatch under <workspace>/.symphony/ before the cancel claim is
+// released (T20). The workspace directory itself and the git tree are
+// preserved. Errors are best-effort and logged at debug level only.
+func (o *Orchestrator) cleanupCancelledWorkspace(workspacePath string) {
+	if workspacePath == "" {
+		return
+	}
+	target := filepath.Join(workspacePath, ".symphony")
+	info, err := os.Stat(target)
+	if err != nil || !info.IsDir() {
+		return
+	}
+	if err := os.RemoveAll(target); err != nil {
+		o.log.Warn("cancel cleanup: failed to remove .symphony", "path", target, "err", err.Error())
+	}
 }

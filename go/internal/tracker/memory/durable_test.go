@@ -28,10 +28,14 @@ func TestMemoryTracker_DurableSurvivesRestart(t *testing.T) {
 	_, err = first.WriteSpec(ctx, "WEB-1", "# spec body", "")
 	require.NoError(t, err)
 
-	// Open a second tracker against the same store; existing issues + specs
-	// must be visible.
+	// Simulate process restart: close the first store (releasing its dir
+	// flock) before reopening at the same path. Two live stores on one path
+	// would (correctly) be refused by the multi-process lock.
+	require.NoError(t, s1.Close())
+
 	s2, err := durable.New(dir)
 	require.NoError(t, err)
+	defer s2.Close() //nolint:errcheck
 	second, err := memory.NewWithDurable(nil, s2)
 	require.NoError(t, err)
 

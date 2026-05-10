@@ -63,6 +63,12 @@ func (r *toolRegistry) runTool(ctx context.Context, workspacePath, name string, 
 	if err != nil {
 		return fmt.Sprintf("error: %v", err), true
 	}
+	// Anthropic rejects empty-string tool_result content with a 400. Substitute
+	// a placeholder so silent-success tools (e.g. a no-op bash) don't poison
+	// the next request.
+	if out == "" {
+		out = "(no output)"
+	}
 	return out, false
 }
 

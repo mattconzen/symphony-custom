@@ -41,6 +41,12 @@ func New(cfg config.Config, httpClient *http.Client) (*Runtime, error) {
 	if cfg.ClaudeSDK.APIKey == "" {
 		return nil, fmt.Errorf("claudesdk: API key is empty (set %s)", cfg.ClaudeSDK.APIKeyEnv)
 	}
+	// Defensive default: a zero TurnTimeoutMs becomes context.WithTimeout(ctx, 0)
+	// which produces an instantly-cancelled context. Mirror the MaxIterations
+	// defaulting below so RunTurn cannot be sabotaged by a misconfigured cfg.
+	if cfg.ClaudeSDK.TurnTimeoutMs <= 0 {
+		cfg.ClaudeSDK.TurnTimeoutMs = 3_600_000
+	}
 	return &Runtime{
 		cfg:    cfg,
 		client: newAPIClient(cfg.ClaudeSDK.APIKey, cfg.ClaudeSDK.BaseURL, cfg.ClaudeSDK.Model, httpClient),
@@ -139,14 +145,31 @@ func (r *Runtime) RunTurn(ctx context.Context, sess agent.Session, prompt string
 		}
 
 		impl.mu.Lock()
+		msgs := cloneMessages(impl.messages)
+		impl.mu.Unlock()
+
+		// Attach a cache breakpoint to the last content block of the final user
+		// message (tool_result or text). Together with the breakpoint on the
+		// system block, this lets the API reuse the prefix that grows on every
+		// turn — saving ~10x on long tool-use loops.
+		annotateCacheBreakpoint(msgs)
+
+		var system []systemTextBlock
+		if sp := r.cfg.ClaudeSDK.SystemPrompt; sp != "" {
+			system = []systemTextBlock{{
+				Type:         "text",
+				Text:         sp,
+				CacheControl: &cacheControl{Type: "ephemeral"},
+			}}
+		}
+
 		req := messagesRequest{
 			Model:     r.cfg.ClaudeSDK.Model,
 			MaxTokens: r.cfg.ClaudeSDK.MaxTokens,
-			Messages:  cloneMessages(impl.messages),
+			Messages:  msgs,
 			Tools:     r.tools.defs(),
-			System:    r.cfg.ClaudeSDK.SystemPrompt,
+			System:    system,
 		}
-		impl.mu.Unlock()
 
 		resp, err := r.client.createMessage(turnCtx, req)
 		if err != nil {
@@ -191,8 +214,31 @@ func (r *Runtime) RunTurn(ctx context.Context, sess agent.Session, prompt string
 			}
 		}
 
+		// Honor stop_reason explicitly. "no tool_use blocks" alone is not enough:
+		// a max_tokens truncation can land mid-turn with no tool_use yet emitted
+		// and we must not silently report success.
+		switch resp.StopReason {
+		case "max_tokens":
+			err := fmt.Errorf("claudesdk: max_tokens_truncation")
+			emit(agent.EventTurnFailed, map[string]any{
+				"err":         err.Error(),
+				"reason":      "max_tokens_truncation",
+				"stop_reason": resp.StopReason,
+			})
+			return agent.TurnResult{
+				SessionID: sess.ID,
+				Status:    agent.TurnFailed,
+				Tokens:    agent.TokenUsage{InputTokens: totalIn, OutputTokens: totalOut, TotalTokens: totalIn + totalOut},
+				Err:       err,
+			}, err
+		}
+
 		if len(toolUses) == 0 {
-			emit(agent.EventTurnCompleted, map[string]any{"stop_reason": resp.StopReason})
+			emit(agent.EventTurnCompleted, map[string]any{
+				"stop_reason":                 resp.StopReason,
+				"cache_creation_input_tokens": resp.Usage.CacheCreationInputTokens,
+				"cache_read_input_tokens":     resp.Usage.CacheReadInputTokens,
+			})
 			return agent.TurnResult{
 				SessionID: sess.ID,
 				Status:    agent.TurnCompleted,
@@ -231,10 +277,36 @@ func (r *Runtime) RunTurn(ctx context.Context, sess agent.Session, prompt string
 	}, err
 }
 
-// cloneMessages returns a shallow copy of the message slice so concurrent
-// appends from another RunTurn cannot mutate an in-flight request body.
+// cloneMessages returns a deep copy of the message slice so concurrent appends
+// from another RunTurn cannot mutate an in-flight request body, and so that
+// per-request mutations (e.g. attaching a cache_control breakpoint to the
+// final content block) do not leak back into the persisted history.
 func cloneMessages(src []message) []message {
 	out := make([]message, len(src))
-	copy(out, src)
+	for i, m := range src {
+		dup := m
+		if m.Content != nil {
+			dup.Content = make([]contentBlock, len(m.Content))
+			copy(dup.Content, m.Content)
+		}
+		out[i] = dup
+	}
 	return out
+}
+
+// annotateCacheBreakpoint attaches cache_control=ephemeral to the last content
+// block of the final user message. The system block carries the other
+// breakpoint; together they let the API treat the static prefix as cacheable.
+func annotateCacheBreakpoint(msgs []message) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "user" {
+			continue
+		}
+		if n := len(msgs[i].Content); n > 0 {
+			blk := msgs[i].Content[n-1]
+			blk.CacheControl = &cacheControl{Type: "ephemeral"}
+			msgs[i].Content[n-1] = blk
+		}
+		return
+	}
 }

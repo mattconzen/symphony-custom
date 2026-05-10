@@ -30,6 +30,18 @@ func TestStore_RoundTrip(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestStore_RoundTripFsyncsParentDir(t *testing.T) {
+	// Round-trip with the fsync-parent-dir path active. We can't directly
+	// observe the dir fsync from user space, but we assert the new code
+	// path doesn't break the happy path.
+	s, err := durable.New(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, s.Save("orchestrator", payload{Hello: "fsync", N: 7}))
+	var got payload
+	require.NoError(t, s.Load("orchestrator", &got))
+	assert.Equal(t, "fsync", got.Hello)
+}
+
 func TestStore_LoadMissing(t *testing.T) {
 	s, err := durable.New(t.TempDir())
 	require.NoError(t, err)
@@ -97,6 +109,31 @@ func TestStore_NestedNameCreatesDir(t *testing.T) {
 	var got payload
 	require.NoError(t, s.Load("trackers/memory_issues", &got))
 	assert.Equal(t, "ok", got.Hello)
+}
+
+func TestStore_DirLockContention(t *testing.T) {
+	dir := t.TempDir()
+	a, err := durable.New(dir)
+	require.NoError(t, err)
+	defer a.Close()
+
+	// A second store on the same path must fail with a clear error.
+	b, err := durable.New(dir)
+	require.Error(t, err)
+	assert.Nil(t, b)
+	assert.Contains(t, err.Error(), "another symphony instance")
+}
+
+func TestStore_DirLockReleasedOnClose(t *testing.T) {
+	dir := t.TempDir()
+	a, err := durable.New(dir)
+	require.NoError(t, err)
+	require.NoError(t, a.Close())
+
+	// After Close, a new store should be able to acquire the lock.
+	b, err := durable.New(dir)
+	require.NoError(t, err)
+	defer b.Close()
 }
 
 func TestStore_Delete(t *testing.T) {

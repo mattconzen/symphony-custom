@@ -296,6 +296,17 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP symphony_polling_interval_ms Configured polling interval in milliseconds.")
 	fmt.Fprintln(w, "# TYPE symphony_polling_interval_ms gauge")
 	fmt.Fprintf(w, "symphony_polling_interval_ms %d\n", snap.Polling.PollIntervalMs)
+
+	// Transcript bus drop totals (events the publisher dropped because a
+	// subscriber's buffer was full). Emitted as a counter keyed by issue
+	// identifier.
+	if h.transcriptBus != nil {
+		fmt.Fprintln(w, "# HELP symphony_transcript_bus_drops_total Transcript events dropped because a subscriber buffer was full.")
+		fmt.Fprintln(w, "# TYPE symphony_transcript_bus_drops_total counter")
+		for id, n := range h.transcriptBus.Snapshot() {
+			fmt.Fprintf(w, "symphony_transcript_bus_drops_total{subscriber=%q} %d\n", id, n)
+		}
+	}
 }
 
 // handleIssuePage renders templates/issue.html.tmpl for the requested

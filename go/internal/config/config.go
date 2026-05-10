@@ -91,6 +91,10 @@ type Agent struct {
 }
 
 // PipelineRole describes one role inside an agent.pipeline list.
+//
+// TimeoutMs is the wall-clock limit for this role in milliseconds. Zero
+// means "inherit the dispatch context timeout" (i.e. no per-role override).
+// Negative values are rejected at preflight.
 type PipelineRole struct {
 	Role           string
 	Runtime        string
@@ -104,6 +108,10 @@ type PipelineRole struct {
 // PipelineLoopback is the body of one entry in PipelineRole.OnArtifact.
 // Matches the proposal: when the agent writes the artifact path, the
 // pipeline jumps back to retry_from up to max_loopbacks times.
+//
+// MaxLoopbacks=0 means "loopbacks disabled" — the first detected loopback
+// artifact is treated as a failure and the dispatch retries. Negative
+// values are rejected at preflight.
 type PipelineLoopback struct {
 	RetryFrom    string
 	MaxLoopbacks int
@@ -575,14 +583,24 @@ func Preflight(cfg Config) error {
 			if role.ReadyArtifact == "" {
 				return fmt.Errorf("agent.pipeline[%s]: ready_artifact is required", role.Role)
 			}
+			// T22: timeout_ms must not be negative (0 inherits dispatch timeout).
+			if role.TimeoutMs < 0 {
+				return fmt.Errorf("agent.pipeline[%s]: timeout_ms must be >= 0, got %d", role.Role, role.TimeoutMs)
+			}
 			for path, lb := range role.OnArtifact {
 				if lb.RetryFrom == "" {
 					return fmt.Errorf("agent.pipeline[%s].on_artifact[%s]: retry_from is required", role.Role, path)
 				}
-				if seen[lb.RetryFrom] > i || seen[lb.RetryFrom] == 0 && lb.RetryFrom != cfg.Agent.Pipeline[0].Role {
-					if idx, ok := seen[lb.RetryFrom]; !ok || idx > i {
-						return fmt.Errorf("agent.pipeline[%s].on_artifact[%s]: retry_from %q must reference an earlier role", role.Role, path, lb.RetryFrom)
-					}
+				// T21: max_loopbacks must not be negative (0 = disabled).
+				if lb.MaxLoopbacks < 0 {
+					return fmt.Errorf("agent.pipeline[%s].on_artifact[%s]: max_loopbacks must be >= 0, got %d", role.Role, path, lb.MaxLoopbacks)
+				}
+				// T23: retry_from must reference an *earlier* role.
+				// self-references (>= i) and forward refs (idx > i) are
+				// both invalid loops with no useful semantics.
+				idx, ok := seen[lb.RetryFrom]
+				if !ok || idx >= i {
+					return fmt.Errorf("agent.pipeline[%s].on_artifact[%s]: retry_from %q must reference an earlier role", role.Role, path, lb.RetryFrom)
 				}
 			}
 		}

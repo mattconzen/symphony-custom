@@ -95,6 +95,103 @@ func TestTail_ReturnsLastN(t *testing.T) {
 	assert.Equal(t, 99, tail[len(tail)-1].Turn)
 }
 
+func TestWriter_OversizedIdentifierFallsBackToMinimal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	w, err := transcript.NewWriter(path)
+	require.NoError(t, err)
+	defer w.Close() //nolint:errcheck
+
+	// IssueIdentifier itself is huge, so dropping the payload won't help.
+	huge := strings.Repeat("y", 100*1024)
+	require.NoError(t, w.Append(transcript.Event{
+		IssueIdentifier: huge,
+		Kind:            "tool_result",
+		Payload:         "small",
+	}))
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close() //nolint:errcheck
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 256*1024), 256*1024)
+	require.True(t, sc.Scan())
+	line := sc.Text()
+	// The written line including newline must be bounded.
+	assert.LessOrEqual(t, len(line)+1, 64*1024, "line should be <= 64 KiB")
+	assert.Contains(t, line, `"error":"event too large"`)
+	assert.NotContains(t, line, huge)
+}
+
+func TestRead_FromHugeOffsetReturnsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	w, err := transcript.NewWriter(path)
+	require.NoError(t, err)
+	require.NoError(t, w.Append(transcript.Event{Kind: "k"}))
+	require.NoError(t, w.Close())
+
+	events, _, complete, err := transcript.Read(path, 1<<31, 10)
+	require.NoError(t, err)
+	assert.Len(t, events, 0)
+	assert.True(t, complete)
+}
+
+func TestWriter_PerFileSizeCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	w, err := transcript.NewWriter(path)
+	require.NoError(t, err)
+	w.SetMaxFileBytes(4096)
+
+	// Write enough events to exceed 4 KiB. Each event with a short
+	// payload is well over 50 bytes, so 200 attempts is plenty.
+	for i := 0; i < 200; i++ {
+		require.NoError(t, w.Append(transcript.Event{
+			IssueIdentifier: "WEB-1",
+			Kind:            "tick",
+			Turn:            i,
+		}))
+	}
+	require.NoError(t, w.Close())
+
+	// File size is bounded near the cap (allowing the marker line).
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, info.Size(), int64(4096+512), "file should respect cap")
+
+	// Read every line; the last must be the synthetic marker.
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close() //nolint:errcheck
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 256*1024)
+	var lines []string
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	require.NotEmpty(t, lines)
+	last := lines[len(lines)-1]
+	assert.Contains(t, last, `"kind":"transcript_truncated"`)
+	assert.Contains(t, last, `"reason":"size_limit"`)
+}
+
+func TestTail_LargeFileReturnsCorrectWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	w, err := transcript.NewWriter(path)
+	require.NoError(t, err)
+	const total = 1500
+	for i := 0; i < total; i++ {
+		require.NoError(t, w.Append(transcript.Event{Kind: "k", Turn: i}))
+	}
+	require.NoError(t, w.Close())
+
+	tail, err := transcript.Tail(path, 5)
+	require.NoError(t, err)
+	require.Len(t, tail, 5)
+	// Expect events at indices 1495..1499 inclusive.
+	for i, ev := range tail {
+		assert.Equal(t, total-5+i, ev.Turn, "tail[%d] Turn mismatch", i)
+	}
+}
+
 func TestBus_FanOut(t *testing.T) {
 	b := transcript.NewBus()
 	ch1, cancel1 := b.Subscribe("WEB-1")
@@ -125,6 +222,23 @@ func TestBus_UnsubscribeStopsDelivery(t *testing.T) {
 	_, ok := <-ch
 	assert.False(t, ok, "channel should be closed")
 	assert.Equal(t, 0, b.SubscriberCount("WEB-1"))
+}
+
+func TestBus_DropCounterIncrementsWhenBufferFull(t *testing.T) {
+	b := transcript.NewBus()
+	_, cancel := b.Subscribe("WEB-1")
+	defer cancel()
+
+	// Buffer is 32; publish 50 without ever receiving, so 18 will drop.
+	const published = 50
+	for i := 0; i < published; i++ {
+		b.Publish(transcript.Event{IssueIdentifier: "WEB-1", Kind: "k"})
+	}
+
+	snap := b.Snapshot()
+	got, ok := snap["WEB-1"]
+	require.True(t, ok, "snapshot should include WEB-1")
+	assert.Equal(t, int64(published-32), got)
 }
 
 func TestBus_OtherIssueNotReceived(t *testing.T) {
