@@ -281,6 +281,93 @@ func TestHandleStatic_ServesEmbeddedAssets(t *testing.T) {
 	}
 }
 
+func TestHealthz(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(observability.Snapshot{})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok\n" {
+		t.Errorf("body: got %q want %q", string(body), "ok\n")
+	}
+
+	postResp, err := http.Post(srv.URL+"/healthz", "", nil)
+	if err != nil {
+		t.Fatalf("POST /healthz: %v", err)
+	}
+	defer postResp.Body.Close()
+	if postResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("status: got %d want 405", postResp.StatusCode)
+	}
+}
+
+func TestMetrics_Format(t *testing.T) {
+	t.Parallel()
+
+	snap := observability.Snapshot{
+		Counts:      observability.Counts{Running: 3, Retrying: 2},
+		CodexTotals: observability.TokenTotals{InputTokens: 1000, OutputTokens: 500, SecondsRunning: 90},
+		Polling:     observability.Polling{Checking: true, PollIntervalMs: 2000},
+	}
+	h := newTestHandler(snap)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") || !strings.Contains(ct, "version=0.0.4") {
+		t.Errorf("Content-Type: got %q want text/plain version=0.0.4", ct)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	got := string(body)
+	for _, marker := range []string{
+		"# HELP symphony_running_sessions",
+		"# TYPE symphony_running_sessions gauge",
+		"symphony_running_sessions 3",
+		"# HELP symphony_retrying_sessions",
+		"# TYPE symphony_retrying_sessions gauge",
+		"symphony_retrying_sessions 2",
+		"# HELP symphony_codex_tokens_total",
+		"# TYPE symphony_codex_tokens_total counter",
+		`symphony_codex_tokens_total{type="input"} 1000`,
+		`symphony_codex_tokens_total{type="output"} 500`,
+		"# HELP symphony_codex_seconds_running",
+		"# TYPE symphony_codex_seconds_running counter",
+		"symphony_codex_seconds_running 90",
+		"# HELP symphony_polling_checking",
+		"# TYPE symphony_polling_checking gauge",
+		"symphony_polling_checking 1",
+		"# HELP symphony_polling_interval_ms",
+		"# TYPE symphony_polling_interval_ms gauge",
+		"symphony_polling_interval_ms 2000",
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("metrics body missing %q", marker)
+		}
+	}
+}
+
 func TestHandleStatic_RejectsTraversal(t *testing.T) {
 	t.Parallel()
 

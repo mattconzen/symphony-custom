@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"mime"
@@ -92,6 +93,8 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("GET /static/{file}", h.handleStatic)
 	h.mux.HandleFunc("GET /ws", h.handleWS)
 	h.mux.HandleFunc("GET /issue/{issue_identifier}", h.handleIssuePage)
+	h.mux.HandleFunc("/healthz", h.handleHealthz)
+	h.mux.HandleFunc("GET /metrics", h.handleMetrics)
 
 	// API routes mirror the Elixir router's explicit `match(:*, ...)` style:
 	// dispatch on method inside one handler per path so 405 responses carry
@@ -146,6 +149,58 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(buf.Bytes())
+}
+
+// handleHealthz returns a minimal liveness probe. The orchestrator running
+// is sufficient — there is no deeper dependency check.
+func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte("ok\n"))
+}
+
+// handleMetrics emits Prometheus text-format metrics derived from the
+// current orchestrator snapshot. We hand-build the output rather than pull
+// in a client library; the metric set is small and stable.
+func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	snap := h.orch.Snapshot()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+
+	pollingChecking := 0
+	if snap.Polling.Checking {
+		pollingChecking = 1
+	}
+
+	fmt.Fprintln(w, "# HELP symphony_running_sessions Number of issues currently running.")
+	fmt.Fprintln(w, "# TYPE symphony_running_sessions gauge")
+	fmt.Fprintf(w, "symphony_running_sessions %d\n", snap.Counts.Running)
+
+	fmt.Fprintln(w, "# HELP symphony_retrying_sessions Number of issues currently waiting in the retry queue.")
+	fmt.Fprintln(w, "# TYPE symphony_retrying_sessions gauge")
+	fmt.Fprintf(w, "symphony_retrying_sessions %d\n", snap.Counts.Retrying)
+
+	fmt.Fprintln(w, "# HELP symphony_codex_tokens_total Total Codex tokens consumed by completed and active sessions.")
+	fmt.Fprintln(w, "# TYPE symphony_codex_tokens_total counter")
+	fmt.Fprintf(w, "symphony_codex_tokens_total{type=\"input\"} %d\n", snap.CodexTotals.InputTokens)
+	fmt.Fprintf(w, "symphony_codex_tokens_total{type=\"output\"} %d\n", snap.CodexTotals.OutputTokens)
+
+	fmt.Fprintln(w, "# HELP symphony_codex_seconds_running Total Codex runtime seconds across completed and active sessions.")
+	fmt.Fprintln(w, "# TYPE symphony_codex_seconds_running counter")
+	fmt.Fprintf(w, "symphony_codex_seconds_running %d\n", snap.CodexTotals.SecondsRunning)
+
+	fmt.Fprintln(w, "# HELP symphony_polling_checking 1 when the orchestrator is currently checking for work, 0 otherwise.")
+	fmt.Fprintln(w, "# TYPE symphony_polling_checking gauge")
+	fmt.Fprintf(w, "symphony_polling_checking %d\n", pollingChecking)
+
+	fmt.Fprintln(w, "# HELP symphony_polling_interval_ms Configured polling interval in milliseconds.")
+	fmt.Fprintln(w, "# TYPE symphony_polling_interval_ms gauge")
+	fmt.Fprintf(w, "symphony_polling_interval_ms %d\n", snap.Polling.PollIntervalMs)
 }
 
 // handleIssuePage renders templates/issue.html.tmpl for the requested

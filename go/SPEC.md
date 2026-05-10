@@ -1943,6 +1943,8 @@ The Go runtime MUST mount the following routes when `-port>0`:
 | GET    | `/api/v1/state`               | 200    | Orchestrator snapshot JSON (see §14.3).                          |
 | GET    | `/api/v1/{issue_identifier}`  | 200/404| Per-issue payload or `issue_not_found` error.                    |
 | POST   | `/api/v1/refresh`             | 202    | `{"queued":true,"coalesced":bool,"requested_at":"…","operations":["poll","reconcile"]}`. |
+| GET    | `/healthz`                    | 200    | `ok\n` (`text/plain; charset=utf-8`).                            |
+| GET    | `/metrics`                    | 200    | Prometheus text format (`text/plain; version=0.0.4`); see §14.6. |
 
 Normative requirements:
 
@@ -2052,6 +2054,28 @@ The Go runtime emits the following codes:
 The Elixir runtime's `orchestrator_unavailable` code is NOT emitted by the Go runtime because
 the orchestrator and HTTP server share a process; if the orchestrator is unreachable, the HTTP
 server has already terminated.
+
+### 14.6 Operations endpoints
+
+`GET /healthz` is a minimal liveness probe: it returns `200 OK` with body `ok\n` and
+`Content-Type: text/plain; charset=utf-8`. Any other method returns `405`. The handler
+performs no dependency check beyond having a serving HTTP layer.
+
+`GET /metrics` emits Prometheus text format (exposition version 0.0.4) with
+`Content-Type: text/plain; version=0.0.4; charset=utf-8`. The metric set is a stable contract
+for scrapers; consumers MAY rely on the names, types, and label keys staying constant across
+runtime versions. Each series MUST be preceded by `# HELP` and `# TYPE` comments per the
+Prometheus exposition spec.
+
+| Series                                          | Type    | Source field                       |
+| ----------------------------------------------- | ------- | ---------------------------------- |
+| `symphony_running_sessions`                     | gauge   | `snap.Counts.Running`              |
+| `symphony_retrying_sessions`                    | gauge   | `snap.Counts.Retrying`             |
+| `symphony_codex_tokens_total{type="input"}`     | counter | `snap.CodexTotals.InputTokens`     |
+| `symphony_codex_tokens_total{type="output"}`    | counter | `snap.CodexTotals.OutputTokens`    |
+| `symphony_codex_seconds_running`                | counter | `snap.CodexTotals.SecondsRunning`  |
+| `symphony_polling_checking`                     | gauge   | `snap.Polling.Checking` (0/1)      |
+| `symphony_polling_interval_ms`                  | gauge   | `snap.Polling.PollIntervalMs`      |
 
 ## 15. Failure Model and Recovery Strategy
 
