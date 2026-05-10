@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -10,7 +11,16 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/openai/symphony/go/internal/transcript"
 )
+
+// wsControlMessage is the inbound JSON envelope clients send over /ws.
+// Either field is the subscribe/unsubscribe target; the other is empty.
+type wsControlMessage struct {
+	SubscribeTranscript   string `json:"subscribe_transcript,omitempty"`
+	UnsubscribeTranscript string `json:"unsubscribe_transcript,omitempty"`
+}
 
 // fragmentTemplates is the ordered list of dashboard sub-templates streamed
 // over the WebSocket as htmx out-of-band swaps. Order matters: the dashboard
@@ -77,16 +87,12 @@ func (b *broadcaster) broadcast() {
 
 // handleWS upgrades the connection, subscribes to orchestrator updates, and
 // streams an initial snapshot followed by an HTML fragment payload on each
-// broadcast. Blocks until the client disconnects, the context is cancelled,
-// or a write fails.
+// broadcast. Also reads inbound JSON control messages from the client so
+// individual /issue/{id} pages can subscribe to live transcript events.
+// Blocks until the client disconnects, the context is cancelled, or a
+// write fails.
 func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// The dashboard is bound to 127.0.0.1 by default and the client is
-		// served from the same origin. InsecureSkipVerify here means "do
-		// not enforce the same-origin check"; that's deliberate because
-		// operators may put the dashboard behind a reverse proxy that
-		// rewrites the Host header. Auth/origin enforcement is the proxy's
-		// job, matching the no-auth design decision in the proposal.
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
@@ -94,12 +100,40 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow() //nolint:errcheck
 
-	ctx := r.Context()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
 	updates, unsubscribe := h.broadcast.subscribe()
 	defer unsubscribe()
 
-	// Send an initial frame so freshly-connected clients see current state
-	// without waiting for the next orchestrator event.
+	// Per-connection transcript subscription set + the merged channel that
+	// receives all events the client is subscribed to.
+	transcriptEvents := make(chan transcript.Event, 64)
+	subs := newTranscriptSubManager(h.transcriptBus, transcriptEvents)
+	defer subs.closeAll()
+
+	// Read-pump: decode JSON control messages from the client.
+	go func() {
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				cancel()
+				return
+			}
+			var msg wsControlMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			if msg.SubscribeTranscript != "" {
+				subs.add(msg.SubscribeTranscript)
+			}
+			if msg.UnsubscribeTranscript != "" {
+				subs.remove(msg.UnsubscribeTranscript)
+			}
+		}
+	}()
+
+	// Send an initial frame so freshly-connected clients see current state.
 	if err := h.writeFragments(ctx, conn); err != nil {
 		return
 	}
@@ -115,8 +149,101 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := h.writeFragments(ctx, conn); err != nil {
 				return
 			}
+		case ev, ok := <-transcriptEvents:
+			if !ok {
+				continue
+			}
+			if err := writeTranscriptFragment(ctx, conn, ev); err != nil {
+				return
+			}
 		}
 	}
+}
+
+// transcriptSubManager keeps a per-connection subscription set and fans
+// in events from the orchestrator bus to a single merged channel.
+type transcriptSubManager struct {
+	bus    *transcript.Bus
+	out    chan<- transcript.Event
+	mu     sync.Mutex
+	cancel map[string]func()
+}
+
+func newTranscriptSubManager(bus *transcript.Bus, out chan<- transcript.Event) *transcriptSubManager {
+	return &transcriptSubManager{bus: bus, out: out, cancel: make(map[string]func())}
+}
+
+func (m *transcriptSubManager) add(id string) {
+	if m.bus == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.cancel[id]; exists {
+		return
+	}
+	ch, cancel := m.bus.Subscribe(id)
+	m.cancel[id] = cancel
+	go func() {
+		for ev := range ch {
+			select {
+			case m.out <- ev:
+			default:
+				// Drop on full buffer; per-issue overload doesn't take
+				// down the whole connection.
+			}
+		}
+	}()
+}
+
+func (m *transcriptSubManager) remove(id string) {
+	m.mu.Lock()
+	cancel, ok := m.cancel[id]
+	delete(m.cancel, id)
+	m.mu.Unlock()
+	if ok {
+		cancel()
+	}
+}
+
+func (m *transcriptSubManager) closeAll() {
+	m.mu.Lock()
+	cancels := make([]func(), 0, len(m.cancel))
+	for _, c := range m.cancel {
+		cancels = append(cancels, c)
+	}
+	m.cancel = make(map[string]func())
+	m.mu.Unlock()
+	for _, c := range cancels {
+		c()
+	}
+}
+
+// writeTranscriptFragment emits a single htmx OOB swap appending one event
+// row to the transcript section for the event's issue identifier.
+func writeTranscriptFragment(ctx context.Context, conn *websocket.Conn, ev transcript.Event) error {
+	payloadJSON, _ := json.Marshal(ev.Payload) //nolint:errcheck
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf,
+		`<div hx-swap-oob="beforeend:#transcript-%s"><li class="transcript-event" data-kind="%s"><span class="ts mono">%s</span><span class="kind">%s</span>`,
+		htmlEscapeAttr(ev.IssueIdentifier),
+		htmlEscapeAttr(ev.Kind),
+		ev.Ts.UTC().Format(time.RFC3339),
+		htmlEscape(ev.Kind),
+	)
+	if ev.Role != "" {
+		fmt.Fprintf(&buf, `<span class="role">%s</span>`, htmlEscape(ev.Role))
+	}
+	fmt.Fprintf(&buf, `<pre class="payload">%s</pre></li></div>`, htmlEscape(string(payloadJSON)))
+
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return conn.Write(writeCtx, websocket.MessageText, buf.Bytes())
+}
+
+func htmlEscape(s string) string { return template.HTMLEscapeString(s) }
+func htmlEscapeAttr(s string) string {
+	return template.HTMLEscapeString(s)
 }
 
 // writeFragments renders each dashboard sub-template wrapped in an htmx

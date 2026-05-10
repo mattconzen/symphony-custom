@@ -294,7 +294,7 @@ func TestAPIRefresh_Accepted_NotCoalesced(t *testing.T) {
 	t.Parallel()
 
 	src := &fakeSource{refreshQueued: true}
-	h := newHandlerFromSource(src, nil, nil)
+	h := newHandlerFromSource(src, nil, nil, nil, nil, nil)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
@@ -336,7 +336,7 @@ func TestAPIRefresh_Accepted_Coalesced(t *testing.T) {
 	// refreshQueued=false simulates a refresh already pending — RequestRefresh
 	// returns false so coalesced=true.
 	src := &fakeSource{refreshQueued: false}
-	h := newHandlerFromSource(src, nil, nil)
+	h := newHandlerFromSource(src, nil, nil, nil, nil, nil)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 

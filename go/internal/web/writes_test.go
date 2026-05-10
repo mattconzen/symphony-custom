@@ -51,7 +51,7 @@ func (f *fakeTracker) WriteSpec(_ context.Context, _, body, ifMatchEtag string) 
 }
 
 func newWriteHandler(trk trackerSource, gen SpecGenerator) *Handler {
-	return newHandlerFromSource(&fakeSource{snap: observability.Snapshot{}, refreshQueued: true}, trk, gen)
+	return newHandlerFromSource(&fakeSource{snap: observability.Snapshot{}, refreshQueued: true}, nil, nil, nil, trk, gen)
 }
 
 func TestCreateIssue_Created(t *testing.T) {

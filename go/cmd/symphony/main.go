@@ -18,17 +18,20 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/openai/symphony/go/internal/agent/claude" // register claude runtime
-	_ "github.com/openai/symphony/go/internal/agent/codex"  // register codex runtime
-	_ "github.com/openai/symphony/go/internal/agent/mock"   // register mock runtime
+	_ "github.com/openai/symphony/go/internal/agent/claude"    // register claude (CLI) runtime
+	_ "github.com/openai/symphony/go/internal/agent/claudesdk" // register claude_sdk (in-process) runtime
+	_ "github.com/openai/symphony/go/internal/agent/codex"     // register codex runtime
+	_ "github.com/openai/symphony/go/internal/agent/mock"      // register mock runtime
 
 	"github.com/openai/symphony/go/internal/agent"
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/durable"
 	gh "github.com/openai/symphony/go/internal/github"
 	"github.com/openai/symphony/go/internal/observability"
 	"github.com/openai/symphony/go/internal/orchestrator"
 	"github.com/openai/symphony/go/internal/tracker"
+	"github.com/openai/symphony/go/internal/transcript"
 	"github.com/openai/symphony/go/internal/web"
 	"github.com/openai/symphony/go/internal/workflow"
 	"github.com/openai/symphony/go/internal/workspace"
@@ -67,15 +70,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 3a. Build durable store when enabled. Failure to set up durability is
+	//     fatal — operators who don't want persistence should set
+	//     durable.enabled=false in WORKFLOW.md.
+	var dstore *durable.Store
+	if cfg.Durable.Enabled {
+		dstore, err = durable.New(cfg.Durable.Path)
+		if err != nil {
+			log.Error("durable store init failed", "path", cfg.Durable.Path, "err", fmt.Sprintf("%v", err))
+			os.Exit(1)
+		}
+		log.Info("durable state enabled", "path", cfg.Durable.Path)
+	}
+
 	// 4. Build tracker. Honour SYMPHONY_SEED_ISSUES env (JSON array of domain.Issue)
 	//    when running with memory tracker.
 	var t tracker.Tracker
+	var seed []domain.Issue
 	if seedJSON := os.Getenv("SYMPHONY_SEED_ISSUES"); seedJSON != "" && cfg.Tracker.Kind == "memory" {
-		var seed []domain.Issue
 		if jsonErr := json.Unmarshal([]byte(seedJSON), &seed); jsonErr != nil {
 			log.Error("SYMPHONY_SEED_ISSUES is not valid JSON", "err", fmt.Sprintf("%v", jsonErr))
 			os.Exit(1)
 		}
+	}
+	if dstore != nil && cfg.Tracker.Kind == "memory" {
+		t, err = tracker.NewWithDurable(cfg, seed, dstore)
+	} else if seed != nil {
 		t, err = tracker.NewWithSeed(cfg, seed)
 	} else {
 		t, err = tracker.New(cfg)
@@ -95,9 +115,14 @@ func main() {
 	// 6. Build workspace manager.
 	ws := workspace.NewManager(cfg)
 
-	// 7. Build orchestrator.
+	// 7. Build orchestrator. The transcript bus is always allocated so the
+	// dispatch path has a publish target; subscribers come from the web
+	// layer's /ws handler.
+	transcriptBus := transcript.NewBus()
 	orch := orchestrator.New(cfg, t, rt, ws, log).
-		WithPromptTemplate(wf.PromptTemplate)
+		WithPromptTemplate(wf.PromptTemplate).
+		WithDurableStore(dstore).
+		WithTranscriptBus(transcriptBus)
 
 	// 7a. Optional GitHub PR reconciler. Disabled when github.owner/repo are
 	// unset.

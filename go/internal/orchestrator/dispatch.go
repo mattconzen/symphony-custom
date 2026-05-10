@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -10,15 +11,37 @@ import (
 	"github.com/openai/symphony/go/internal/domain"
 	"github.com/openai/symphony/go/internal/observability"
 	"github.com/openai/symphony/go/internal/prompt"
+	"github.com/openai/symphony/go/internal/transcript"
 )
 
 // dispatchOne runs the full lifecycle for a single issue inside its own
 // goroutine: workspace ensure → hooks → session → turn loop → cleanup.
+// When agent.pipeline is configured, dispatch is delegated to the
+// pipeline-aware path instead.
 func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
+	if len(o.cfg.Agent.Pipeline) > 0 {
+		o.dispatchPipeline(ctx, issue)
+		return
+	}
 	log := o.log.WithIssue(issue)
 	log.Info("dispatch started")
 
+	// Open a per-dispatch transcript writer. Failure to open is logged
+	// and the dispatch continues — the audit trail is best-effort.
+	var tw *transcript.Writer
+	if path := o.transcriptPath(issue); path != "" {
+		var err error
+		tw, err = transcript.NewWriter(path)
+		if err != nil {
+			log.Warn("transcript writer init failed", "err", err.Error())
+			tw = nil
+		}
+	}
+
 	defer func() {
+		if tw != nil {
+			_ = tw.Close() //nolint:errcheck
+		}
 		o.releaseClaim(issue.ID)
 		log.Info("dispatch finished")
 	}()
@@ -65,7 +88,7 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
 	o.notify()
 
 	sessionLog := log.WithSession(sess.ID)
-	runErr := o.runTurnLoop(ctx, issue, ws, sess, sessionLog)
+	runErr := o.runTurnLoop(ctx, issue, ws, sess, sessionLog, tw)
 
 	// StopSession — always called; errors are logged and ignored.
 	if stopErr := o.runtime.StopSession(ctx, sess); stopErr != nil {
@@ -84,8 +107,59 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, issue domain.Issue) {
 		}
 	}
 
-	if runErr != nil && ctx.Err() == nil {
+	if runErr != nil && ctx.Err() == nil && !o.cancelRequested(issue.ID) {
 		o.scheduleRetry(issue, runErr)
+	}
+}
+
+// cancelRequested reports whether the running entry for issueID was
+// explicitly cancelled via RequestCancel. Used by dispatchOne to suppress
+// the retry-on-error path for cancelled dispatches.
+func (o *Orchestrator) cancelRequested(issueID string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	entry, ok := o.running[issueID]
+	if !ok {
+		return false
+	}
+	return entry.state == runStateCancelRequested
+}
+
+// observePauseOrCancel inspects the run entry's state at the top of each
+// turn. Returns true when the loop should exit (cancellation or context
+// already done). Blocks while the entry is paused.
+func (o *Orchestrator) observePauseOrCancel(ctx context.Context, issueID string, log *observability.Logger, turn int) bool {
+	o.mu.Lock()
+	entry, ok := o.running[issueID]
+	if !ok {
+		o.mu.Unlock()
+		return false
+	}
+	switch entry.state {
+	case runStateCancelRequested:
+		o.mu.Unlock()
+		log.Info("turn loop cancelled by operator", "turn", turn)
+		return true
+	case runStatePauseRequested:
+		// Promote pause_requested → paused now that we've reached a quiescent
+		// point between turns.
+		entry.state = runStatePaused
+		ch := entry.pauseCh
+		o.mu.Unlock()
+		o.notify()
+		if ch != nil {
+			log.Info("turn loop paused (waiting for resume)", "turn", turn)
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return true
+			}
+			log.Info("turn loop resumed", "turn", turn)
+		}
+		return o.cancelRequested(issueID)
+	default:
+		o.mu.Unlock()
+		return false
 	}
 }
 
@@ -97,6 +171,7 @@ func (o *Orchestrator) runTurnLoop(
 	ws domain.Workspace,
 	sess agent.Session,
 	log *observability.Logger,
+	tw *transcript.Writer,
 ) error {
 	maxTurns := o.cfg.Agent.MaxTurns
 	if maxTurns <= 0 {
@@ -116,6 +191,11 @@ func (o *Orchestrator) runTurnLoop(
 		// Check context cancellation before each turn.
 		if ctx.Err() != nil {
 			log.Info("turn loop cancelled", "turn", turn)
+			return ctx.Err()
+		}
+
+		// Honour operator-requested pause / cancel.
+		if cancelled := o.observePauseOrCancel(ctx, issue.ID, log, turn); cancelled {
 			return ctx.Err()
 		}
 
@@ -152,10 +232,26 @@ func (o *Orchestrator) runTurnLoop(
 				o.recordPRLink(issue, pl)
 			}
 		})
+		currentTurn := turn
 		cb := func(ev agent.Event) {
 			log.Debug("agent event", "kind", string(ev.Kind))
 			if ev.Kind == agent.EventAssistantMessage || ev.Kind == agent.EventToolCall || ev.Kind == agent.EventToolResult || ev.Kind == agent.EventOtherMessage {
 				prEmitter.Scan(sess.ID, fmt.Sprintf("%v", ev.Payload))
+			}
+			tev := transcript.Event{
+				Ts:              ev.Timestamp,
+				IssueID:         issue.ID,
+				IssueIdentifier: issue.Identifier,
+				SessionID:       sess.ID,
+				Turn:            currentTurn,
+				Kind:            string(ev.Kind),
+				Payload:         ev.Payload,
+			}
+			if tw != nil {
+				_ = tw.Append(tev) //nolint:errcheck
+			}
+			if o.transcriptBus != nil {
+				o.transcriptBus.Publish(tev)
 			}
 		}
 
@@ -296,4 +392,27 @@ func truncateOutput(out []byte, maxBytes int) string {
 	}
 	truncated := string(out[:maxBytes])
 	return truncated + "\n... [truncated, full output suppressed]\n"
+}
+
+// transcriptPath returns the absolute path to the per-issue transcript
+// JSONL file inside the workspace's .symphony/ subdirectory. Returns ""
+// when the workspace root is unset (test orchestrators).
+func (o *Orchestrator) transcriptPath(issue domain.Issue) string {
+	root := o.cfg.Workspace.Root
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, issue.WorkspaceKey(), ".symphony", "transcript.jsonl")
+}
+
+// TranscriptPathForIdentifier returns the transcript file path for the
+// given issue identifier, suitable for the GET /api/v1/issues/{id}/transcript
+// handler.
+func (o *Orchestrator) TranscriptPathForIdentifier(identifier string) string {
+	root := o.cfg.Workspace.Root
+	if root == "" {
+		return ""
+	}
+	key := domain.Issue{Identifier: identifier}.WorkspaceKey()
+	return filepath.Join(root, key, ".symphony", "transcript.jsonl")
 }

@@ -30,8 +30,13 @@ func (o *Orchestrator) Snapshot() observability.Snapshot {
 
 	running := make([]observability.RunningEntry, 0, len(o.running))
 	runningIDs := make(map[string]struct{}, len(o.running))
+	totalRoles := len(o.cfg.Agent.Pipeline)
 	for _, entry := range o.running {
-		running = append(running, runEntryToSnapshot(entry))
+		snap := runEntryToSnapshot(entry)
+		if entry.pipeline != nil && totalRoles > 0 {
+			snap.PipelineTotalRoles = totalRoles
+		}
+		running = append(running, snap)
 		runningIDs[entry.issue.Identifier] = struct{}{}
 	}
 	sort.Slice(running, func(i, j int) bool {
@@ -125,6 +130,11 @@ func runEntryToSnapshot(e *runEntry) observability.RunningEntry {
 		State:           e.issue.State,
 		TurnCount:       e.turnCount,
 		Tokens:          e.tokens,
+		RunState:        e.state.String(),
+	}
+	if e.pipeline != nil {
+		out.PipelineRole = e.pipeline.CurrentRole
+		out.PipelineCompleted = append([]string(nil), e.pipeline.CompletedRoles...)
 	}
 	if e.workspacePath != "" {
 		wp := e.workspacePath

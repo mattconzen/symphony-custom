@@ -91,6 +91,16 @@ type RunningEntry struct {
 	StartedAt       *time.Time  `json:"started_at"`
 	LastEventAt     *time.Time  `json:"last_event_at"`
 	Tokens          EntryTokens `json:"tokens"`
+	// RunState is the operator-controlled lifecycle marker: one of
+	// "running", "pause_requested", "paused", "cancel_requested". The Go
+	// dashboard exposes this; the Elixir Presenter does not emit it.
+	RunState string `json:"run_state"`
+	// PipelineRole, PipelineCompleted, PipelineTotalRoles describe progress
+	// through agent.pipeline (SPEC §10.9). Omitted on issues running under
+	// the single-role legacy path.
+	PipelineRole       string   `json:"pipeline_role,omitempty"`
+	PipelineCompleted  []string `json:"pipeline_completed,omitempty"`
+	PipelineTotalRoles int      `json:"pipeline_total_roles,omitempty"`
 }
 
 // RetryEntry mirrors Elixir snapshot.retrying[]. Field names match the

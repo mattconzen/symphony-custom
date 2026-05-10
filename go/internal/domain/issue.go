@@ -51,6 +51,16 @@ type PullRequest struct {
 	UpdatedAt time.Time  `json:"updated_at"`
 }
 
+// PipelineProgress tracks per-role completion when an issue is being run
+// through agent.pipeline (SPEC §10.9). Nil on issues that run under the
+// single-role legacy path.
+type PipelineProgress struct {
+	CurrentRole    string            `json:"current_role,omitempty"`
+	CompletedRoles []string          `json:"completed_roles,omitempty"`
+	Loopbacks      map[string]int    `json:"loopbacks,omitempty"`
+	Artifacts      map[string]string `json:"artifacts,omitempty"`
+}
+
 // Issue is the normalized issue record used by orchestration, prompt rendering,
 // and observability.
 type Issue struct {
@@ -67,6 +77,7 @@ type Issue struct {
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
 	PR          *PullRequest
+	Pipeline    *PipelineProgress
 }
 
 // WorkspaceKey returns the sanitized workspace directory name derived from the

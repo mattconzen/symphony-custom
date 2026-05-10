@@ -18,6 +18,10 @@ var ErrTemplateRender = errors.New("template_render_error")
 type Vars struct {
 	Issue   domain.Issue
 	Attempt *int
+	// Artifacts is populated by the pipeline dispatcher (SPEC §10.9) with
+	// the contents of each previously-completed role's ready_artifact,
+	// keyed by role name. Single-role dispatch leaves it nil.
+	Artifacts map[string]string
 }
 
 // Render renders a Liquid template with the given vars per SPEC §5.4.
@@ -36,13 +40,23 @@ func Render(template string, vars Vars) (string, error) {
 	if vars.Attempt != nil {
 		bindings["attempt"] = *vars.Attempt
 	}
+	if vars.Artifacts != nil {
+		// Convert to map[string]any so the Liquid engine can index by role
+		// name (e.g. `{{ artifacts.planner }}`).
+		am := make(map[string]any, len(vars.Artifacts))
+		for k, v := range vars.Artifacts {
+			am[k] = v
+		}
+		bindings["artifacts"] = am
+	}
 
 	// Collect variable names referenced in the template to detect unknowns.
 	// osteele/liquid by default renders unknown variables as empty string.
 	// We implement strict mode by checking which variables are referenced.
 	knownTopLevel := map[string]bool{
-		"issue":   true,
-		"attempt": true,
+		"issue":     true,
+		"attempt":   true,
+		"artifacts": true,
 	}
 
 	// Extract top-level variable references from the template.

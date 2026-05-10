@@ -32,6 +32,15 @@ var RegisterClaudeFactory func(fn func(config.Config) (Runtime, error))
 // claudeFactory holds the Claude runtime constructor registered by the claude package.
 var claudeFactory func(config.Config) (Runtime, error)
 
+// RegisterClaudeSDKFactory registers the in-process Anthropic-SDK runtime
+// factory. Called by agent/claudesdk's init() to keep the import graph
+// acyclic.
+var RegisterClaudeSDKFactory func(fn func(config.Config) (Runtime, error))
+
+// claudeSDKFactory holds the claude_sdk runtime constructor registered by the
+// claudesdk package.
+var claudeSDKFactory func(config.Config) (Runtime, error)
+
 func init() {
 	RegisterMockFactory = func(fn func() Runtime) {
 		mockFactory = fn
@@ -41,6 +50,9 @@ func init() {
 	}
 	RegisterClaudeFactory = func(fn func(config.Config) (Runtime, error)) {
 		claudeFactory = fn
+	}
+	RegisterClaudeSDKFactory = func(fn func(config.Config) (Runtime, error)) {
+		claudeSDKFactory = fn
 	}
 }
 
@@ -120,6 +132,22 @@ type Runtime interface {
 	StopSession(ctx context.Context, sess Session) error
 }
 
+// NewForRole returns a Runtime configured for one pipeline role. The
+// role-supplied Runtime + MaxTurns override the cfg defaults; everything
+// else (codex / claude / claude_sdk blocks) is inherited so an operator
+// only has to repeat the bits that differ per role.
+func NewForRole(cfg config.Config, role config.PipelineRole) (Runtime, error) {
+	if role.Runtime == "" {
+		return nil, fmt.Errorf("agent.pipeline[%s]: runtime is required", role.Role)
+	}
+	scoped := cfg
+	scoped.Agent.Runtime = role.Runtime
+	if role.MaxTurns > 0 {
+		scoped.Agent.MaxTurns = role.MaxTurns
+	}
+	return New(scoped)
+}
+
 // New returns a Runtime for the configured agent runtime. For Phase 1,
 // "mock" is supported (when the mock package is imported). Codex and Claude
 // are added in later phases.
@@ -140,6 +168,11 @@ func New(cfg config.Config) (Runtime, error) {
 			return nil, fmt.Errorf("claude runtime not registered (import _ \"github.com/openai/symphony/go/internal/agent/claude\")")
 		}
 		return claudeFactory(cfg)
+	case "claude_sdk":
+		if claudeSDKFactory == nil {
+			return nil, fmt.Errorf("claude_sdk runtime not registered (import _ \"github.com/openai/symphony/go/internal/agent/claudesdk\")")
+		}
+		return claudeSDKFactory(cfg)
 	default:
 		return nil, fmt.Errorf("unsupported agent.runtime: %s", cfg.Agent.Runtime)
 	}

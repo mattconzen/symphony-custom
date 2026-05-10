@@ -34,7 +34,8 @@
         "total_tokens": 800,
         "input_tokens": 500,
         "output_tokens": 300
-      }
+      },
+      "run_state": "running"
     },
     {
       "issue_id": "issue-2",
@@ -52,7 +53,8 @@
         "total_tokens": 700,
         "input_tokens": 400,
         "output_tokens": 300
-      }
+      },
+      "run_state": "running"
     }
   ],
   "retrying": [

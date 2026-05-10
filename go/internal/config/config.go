@@ -84,6 +84,29 @@ type Agent struct {
 	MaxTurns                   int
 	MaxRetryBackoffMs          int
 	MaxConcurrentAgentsByState map[string]int
+	// Pipeline is the optional ordered list of roles run sequentially
+	// against the same workspace. When nil, the single-runtime path
+	// (Agent.Runtime) is used unchanged. See SPEC §10.9.
+	Pipeline []PipelineRole
+}
+
+// PipelineRole describes one role inside an agent.pipeline list.
+type PipelineRole struct {
+	Role           string
+	Runtime        string
+	MaxTurns       int
+	PromptTemplate string
+	ReadyArtifact  string
+	TimeoutMs      int
+	OnArtifact     map[string]PipelineLoopback
+}
+
+// PipelineLoopback is the body of one entry in PipelineRole.OnArtifact.
+// Matches the proposal: when the agent writes the artifact path, the
+// pipeline jumps back to retry_from up to max_loopbacks times.
+type PipelineLoopback struct {
+	RetryFrom    string
+	MaxLoopbacks int
 }
 
 // Codex holds codex-specific configuration per SPEC §5.3.6.
@@ -107,6 +130,48 @@ type Claude struct {
 	StallTimeoutMs int
 }
 
+// ClaudeSDK holds claude_sdk-runtime configuration per SPEC §10.9. The SDK
+// runtime calls the Anthropic Messages API in-process and executes Symphony's
+// canonical tool set against the per-issue workspace; no subprocess is
+// launched.
+type ClaudeSDK struct {
+	// Model is the Anthropic model ID (e.g. "claude-sonnet-4-6"). Defaults to
+	// the latest production Sonnet at the time of release.
+	Model string
+	// APIKeyEnv is the environment variable holding the API key. Default:
+	// "ANTHROPIC_API_KEY".
+	APIKeyEnv string
+	// APIKey is the resolved key value, populated from APIKeyEnv at
+	// Resolve-time. Operators normally rely on the env-var indirection
+	// rather than embedding the key in WORKFLOW.md.
+	APIKey string
+	// BaseURL overrides the Anthropic API endpoint. Default:
+	// "https://api.anthropic.com". Tests point this at httptest.NewServer
+	// to keep runs hermetic.
+	BaseURL string
+	// MaxTokens caps the model's output per request. Default: 8192.
+	MaxTokens int
+	// TurnTimeoutMs bounds the wall-clock time for one Symphony turn
+	// (which may issue many Messages API requests internally as tool calls
+	// loop). Default: 1 hour.
+	TurnTimeoutMs int
+	// MaxIterations caps the inner tool-call loop within one Symphony turn,
+	// guarding against runaway agents. Default: 50.
+	MaxIterations int
+	// SystemPrompt prepends a system block to every Messages request.
+	// Operators use this for repo-wide guardrails; leave empty for the
+	// runtime default.
+	SystemPrompt string
+}
+
+// Durable holds the optional durable-state block. When Enabled, orchestrator
+// state is mirrored to JSON files under Path and reloaded on startup. The
+// path is created at runtime if missing; preflight verifies write access.
+type Durable struct {
+	Enabled bool
+	Path    string
+}
+
 // GitHub holds the optional github block: when set, the orchestrator
 // periodically polls GitHub for the PR state of issues whose agents have
 // emitted a pr_link event. Empty Owner OR Repo disables the reconciler.
@@ -127,7 +192,9 @@ type Config struct {
 	Agent     Agent
 	Codex     Codex
 	Claude    Claude
+	ClaudeSDK ClaudeSDK
 	GitHub    GitHub
+	Durable   Durable
 }
 
 // Resolve builds a Config from a workflow definition and the directory containing
@@ -260,6 +327,39 @@ func Resolve(wf domain.Workflow, workflowDir string) (Config, error) {
 					cfg.Agent.MaxConcurrentAgentsByState = m
 				}
 			}
+			// pipeline
+			if pl, ok := am["pipeline"]; ok {
+				if list, ok := pl.([]any); ok {
+					for _, item := range list {
+						rm, ok := item.(map[string]any)
+						if !ok {
+							continue
+						}
+						role := PipelineRole{
+							Role:           strVal(rm, "role"),
+							Runtime:        strVal(rm, "runtime"),
+							MaxTurns:       intVal(rm, "max_turns"),
+							PromptTemplate: strVal(rm, "prompt_template"),
+							ReadyArtifact:  strVal(rm, "ready_artifact"),
+							TimeoutMs:      intVal(rm, "timeout_ms"),
+						}
+						if oa, ok := rm["on_artifact"].(map[string]any); ok {
+							role.OnArtifact = make(map[string]PipelineLoopback, len(oa))
+							for path, body := range oa {
+								bm, ok := body.(map[string]any)
+								if !ok {
+									continue
+								}
+								role.OnArtifact[path] = PipelineLoopback{
+									RetryFrom:    strVal(bm, "retry_from"),
+									MaxLoopbacks: intVal(bm, "max_loopbacks"),
+								}
+							}
+						}
+						cfg.Agent.Pipeline = append(cfg.Agent.Pipeline, role)
+					}
+				}
+			}
 		}
 	}
 	if cfg.Agent.Runtime == "" {
@@ -336,6 +436,44 @@ func Resolve(wf domain.Workflow, workflowDir string) (Config, error) {
 		cfg.Claude.StallTimeoutMs = 300000
 	}
 
+	// ---- ClaudeSDK (optional) ----
+	if c, ok := wf.Config["claude_sdk"]; ok {
+		if cm, ok := c.(map[string]any); ok {
+			cfg.ClaudeSDK.Model = strVal(cm, "model")
+			cfg.ClaudeSDK.APIKeyEnv = strVal(cm, "api_key_env")
+			cfg.ClaudeSDK.BaseURL = strVal(cm, "base_url")
+			cfg.ClaudeSDK.SystemPrompt = strVal(cm, "system_prompt")
+			if v := intVal(cm, "max_tokens"); v > 0 {
+				cfg.ClaudeSDK.MaxTokens = v
+			}
+			if v := intVal(cm, "turn_timeout_ms"); v > 0 {
+				cfg.ClaudeSDK.TurnTimeoutMs = v
+			}
+			if v := intVal(cm, "max_iterations"); v > 0 {
+				cfg.ClaudeSDK.MaxIterations = v
+			}
+		}
+	}
+	if cfg.ClaudeSDK.Model == "" {
+		cfg.ClaudeSDK.Model = "claude-sonnet-4-6"
+	}
+	if cfg.ClaudeSDK.APIKeyEnv == "" {
+		cfg.ClaudeSDK.APIKeyEnv = "ANTHROPIC_API_KEY"
+	}
+	cfg.ClaudeSDK.APIKey = os.Getenv(cfg.ClaudeSDK.APIKeyEnv)
+	if cfg.ClaudeSDK.BaseURL == "" {
+		cfg.ClaudeSDK.BaseURL = "https://api.anthropic.com"
+	}
+	if cfg.ClaudeSDK.MaxTokens == 0 {
+		cfg.ClaudeSDK.MaxTokens = 8192
+	}
+	if cfg.ClaudeSDK.TurnTimeoutMs == 0 {
+		cfg.ClaudeSDK.TurnTimeoutMs = 3600000
+	}
+	if cfg.ClaudeSDK.MaxIterations == 0 {
+		cfg.ClaudeSDK.MaxIterations = 50
+	}
+
 	// ---- GitHub (optional) ----
 	if g, ok := wf.Config["github"]; ok {
 		if gm, ok := g.(map[string]any); ok {
@@ -355,6 +493,26 @@ func Resolve(wf domain.Workflow, workflowDir string) (Config, error) {
 		cfg.GitHub.PRPollInterval = 60 * time.Second
 	}
 
+	// ---- Durable (optional) ----
+	// Defaults: Enabled=true, Path="<workflowDir>/.symphony/state". Operators
+	// who want today's pure in-memory behavior set `durable.enabled: false`.
+	cfg.Durable.Enabled = true
+	if d, ok := wf.Config["durable"]; ok {
+		if dm, ok := d.(map[string]any); ok {
+			if v, ok := dm["enabled"]; ok {
+				if b, ok := v.(bool); ok {
+					cfg.Durable.Enabled = b
+				}
+			}
+			if p := strVal(dm, "path"); p != "" {
+				cfg.Durable.Path = resolvePathField(p, workflowDir)
+			}
+		}
+	}
+	if cfg.Durable.Path == "" {
+		cfg.Durable.Path = filepath.Join(workflowDir, ".symphony", "state")
+	}
+
 	return cfg, nil
 }
 
@@ -365,9 +523,10 @@ func Preflight(cfg Config) error {
 	}
 
 	validRuntimes := map[string]bool{
-		"codex":  true,
-		"claude": true,
-		"mock":   true,
+		"codex":      true,
+		"claude":     true,
+		"claude_sdk": true,
+		"mock":       true,
 	}
 	if !validRuntimes[cfg.Agent.Runtime] {
 		return fmt.Errorf("%w: %q", ErrInvalidAgentRuntime, cfg.Agent.Runtime)
@@ -380,13 +539,53 @@ func Preflight(cfg Config) error {
 
 	// Claude runtime is single-turn only per SPEC §10.8.7: claude --print exits
 	// after emitting its result event, so multi-turn requires a different runtime.
+	// claude_sdk has no such constraint (it calls the Messages API in-process).
 	if cfg.Agent.Runtime == "claude" && cfg.Agent.MaxTurns > 1 {
 		return fmt.Errorf("%w: got max_turns=%d", ErrClaudeSingleTurnOnly, cfg.Agent.MaxTurns)
+	}
+
+	// claude_sdk requires an API key at dispatch-time; surface it as a
+	// preflight error so operators see it before the first poll tick.
+	if cfg.Agent.Runtime == "claude_sdk" && cfg.ClaudeSDK.APIKey == "" {
+		return fmt.Errorf("agent.runtime=claude_sdk requires %s to be set", cfg.ClaudeSDK.APIKeyEnv)
 	}
 
 	// between_turns requires positive timeout_ms
 	if cfg.Hooks.BetweenTurns != "" && cfg.Hooks.TimeoutMs <= 0 {
 		return ErrBetweenTurnsRequiresTimeout
+	}
+
+	// agent.pipeline structural validation per SPEC §10.9.
+	if len(cfg.Agent.Pipeline) > 0 {
+		seen := make(map[string]int, len(cfg.Agent.Pipeline))
+		for i, role := range cfg.Agent.Pipeline {
+			if role.Role == "" {
+				return fmt.Errorf("agent.pipeline[%d]: role is required", i)
+			}
+			if _, dup := seen[role.Role]; dup {
+				return fmt.Errorf("agent.pipeline: duplicate role %q", role.Role)
+			}
+			seen[role.Role] = i
+			if !validRuntimes[role.Runtime] {
+				return fmt.Errorf("agent.pipeline[%s]: invalid runtime %q", role.Role, role.Runtime)
+			}
+			if role.PromptTemplate == "" {
+				return fmt.Errorf("agent.pipeline[%s]: prompt_template is required", role.Role)
+			}
+			if role.ReadyArtifact == "" {
+				return fmt.Errorf("agent.pipeline[%s]: ready_artifact is required", role.Role)
+			}
+			for path, lb := range role.OnArtifact {
+				if lb.RetryFrom == "" {
+					return fmt.Errorf("agent.pipeline[%s].on_artifact[%s]: retry_from is required", role.Role, path)
+				}
+				if seen[lb.RetryFrom] > i || seen[lb.RetryFrom] == 0 && lb.RetryFrom != cfg.Agent.Pipeline[0].Role {
+					if idx, ok := seen[lb.RetryFrom]; !ok || idx > i {
+						return fmt.Errorf("agent.pipeline[%s].on_artifact[%s]: retry_from %q must reference an earlier role", role.Role, path, lb.RetryFrom)
+					}
+				}
+			}
+		}
 	}
 
 	// Tracker-kind-specific required fields per SPEC §6.3.
