@@ -14,13 +14,19 @@ import (
 // a full orchestrator. The dashboard template only reads fields off the
 // snapshot, so a zero-valued Snapshot is enough to exercise the handler.
 type fakeSource struct {
-	snap observability.Snapshot
+	snap          observability.Snapshot
+	workspaceRoot string
 }
 
 func (f *fakeSource) Snapshot() observability.Snapshot { return f.snap }
+func (f *fakeSource) WorkspaceRoot() string            { return f.workspaceRoot }
 
 func newTestHandler(snap observability.Snapshot) *Handler {
 	return newHandlerFromSource(&fakeSource{snap: snap})
+}
+
+func newTestHandlerWithRoot(snap observability.Snapshot, root string) *Handler {
+	return newHandlerFromSource(&fakeSource{snap: snap, workspaceRoot: root})
 }
 
 func TestHandleDashboard_RendersOK(t *testing.T) {
@@ -117,6 +123,81 @@ func TestDashboard_RefreshButton(t *testing.T) {
 		`class="refresh-button"`,
 		`hx-post="/api/v1/refresh"`,
 		`hx-swap="none"`,
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Errorf("body missing %q", marker)
+		}
+	}
+}
+
+func TestIssueDetailPage_Found(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(sampleSnapshot())
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/issue/TEST-1")
+	if err != nil {
+		t.Fatalf("GET issue page: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type: got %q want text/html prefix", ct)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	for _, marker := range []string{
+		`TEST-1`,
+		`Session</h2>`,
+		`Tokens</h2>`,
+		`sess-1`,
+		`/tmp/work/TEST-1`,
+		`href="/"`,
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Errorf("body missing %q", marker)
+		}
+	}
+	if strings.Contains(string(body), "Retry</h2>") {
+		t.Errorf("running-only issue should not render Retry section")
+	}
+}
+
+func TestIssueDetailPage_NotFound(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(sampleSnapshot())
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/issue/UNKNOWN-99")
+	if err != nil {
+		t.Fatalf("GET issue page: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: got %d want 404", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type: got %q want text/html prefix", ct)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	for _, marker := range []string{
+		`Issue not found`,
+		`UNKNOWN-99`,
+		`href="/"`,
 	} {
 		if !strings.Contains(string(body), marker) {
 			t.Errorf("body missing %q", marker)

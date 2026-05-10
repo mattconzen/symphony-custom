@@ -90,6 +90,7 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("/", h.handleDashboard)
 	h.mux.HandleFunc("GET /static/{file}", h.handleStatic)
 	h.mux.HandleFunc("GET /ws", h.handleWS)
+	h.mux.HandleFunc("GET /issue/{issue_identifier}", h.handleIssuePage)
 
 	// API routes mirror the Elixir router's explicit `match(:*, ...)` style:
 	// dispatch on method inside one handler per path so 405 responses carry
@@ -143,6 +144,36 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(buf.Bytes())
+}
+
+// handleIssuePage renders templates/issue.html.tmpl for the requested
+// issue identifier. Returns 404 with an HTML "issue not found" body when
+// neither a running nor a retry entry matches — JSON 404 stays scoped to
+// /api/v1/{id}.
+func (h *Handler) handleIssuePage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("issue_identifier")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+
+	payload, ok := buildIssuePayload(h.orch.Snapshot(), id, h.orch.WorkspaceRoot())
+	if !ok {
+		var buf bytes.Buffer
+		err := h.tmpl.ExecuteTemplate(&buf, "issue-not-found", map[string]any{"Identifier": id})
+		if err != nil {
+			http.Error(w, "template execute: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write(buf.Bytes())
+		return
+	}
+
+	var buf bytes.Buffer
+	if err := h.tmpl.ExecuteTemplate(&buf, "issue.html.tmpl", payload); err != nil {
+		http.Error(w, "template execute: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	_, _ = w.Write(buf.Bytes())
 }
 

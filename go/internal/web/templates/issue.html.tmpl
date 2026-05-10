@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+  {{ template "head" . }}
+  <body>
+    <main class="app-shell">
+      <section class="dashboard-shell">
+        <header class="hero-card">
+          <div class="hero-grid">
+            <div>
+              <p class="eyebrow">Symphony Observability</p>
+              <h1 class="hero-title">{{ .IssueIdentifier }}</h1>
+              <p class="hero-copy">
+                <span class="{{ stateBadgeClass .Status }}">{{ .Status }}</span>
+              </p>
+              <p class="hero-copy"><a class="issue-link" href="/">&larr; Back to dashboard</a></p>
+            </div>
+          </div>
+        </header>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Session</h2>
+              <p class="section-copy">Active session detail for the issue.</p>
+            </div>
+          </div>
+          {{ if .Running }}
+            <dl class="detail-grid">
+              <dt>Session ID</dt>
+              <dd class="mono">{{ or .Running.SessionID "n/a" }}</dd>
+              <dt>Started at</dt>
+              <dd class="mono numeric">{{ or .Running.StartedAt "n/a" }}</dd>
+              <dt>Turn count</dt>
+              <dd class="numeric">{{ .Running.TurnCount }}</dd>
+              <dt>Last event</dt>
+              <dd>{{ or .Running.LastEvent "n/a" }}</dd>
+              <dt>Last message</dt>
+              <dd>{{ or .Running.LastMessage "n/a" }}</dd>
+              <dt>Workspace path</dt>
+              <dd class="mono">{{ or .Workspace.Path "n/a" }}</dd>
+            </dl>
+          {{ else }}
+            <p class="empty-state">No active session.</p>
+            <dl class="detail-grid">
+              <dt>Workspace path</dt>
+              <dd class="mono">{{ or .Workspace.Path "n/a" }}</dd>
+            </dl>
+          {{ end }}
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Tokens</h2>
+              <p class="section-copy">Codex token usage for this session.</p>
+            </div>
+          </div>
+          {{ if .Running }}
+            <dl class="detail-grid">
+              <dt>Input</dt>
+              <dd class="numeric">{{ formatInt .Running.Tokens.InputTokens }}</dd>
+              <dt>Output</dt>
+              <dd class="numeric">{{ formatInt .Running.Tokens.OutputTokens }}</dd>
+              <dt>Total</dt>
+              <dd class="numeric">{{ formatInt .Running.Tokens.TotalTokens }}</dd>
+            </dl>
+          {{ else }}
+            <p class="empty-state">No token usage recorded.</p>
+          {{ end }}
+        </section>
+
+        {{ if .Retry }}
+          <section class="section-card">
+            <div class="section-header">
+              <div>
+                <h2 class="section-title">Retry</h2>
+                <p class="section-copy">Issue is queued for retry.</p>
+              </div>
+            </div>
+            <dl class="detail-grid">
+              <dt>Attempt</dt>
+              <dd class="numeric">{{ .Retry.Attempt }}</dd>
+              <dt>Due at</dt>
+              <dd class="mono numeric">{{ or .Retry.DueAt "n/a" }}</dd>
+              <dt>Error</dt>
+              <dd>{{ or .Retry.Error "n/a" }}</dd>
+            </dl>
+          </section>
+        {{ end }}
+      </section>
+    </main>
+  </body>
+</html>
+
+{{ define "issue-not-found" }}
+<!DOCTYPE html>
+<html lang="en">
+  {{ template "head" . }}
+  <body>
+    <main class="app-shell">
+      <section class="dashboard-shell">
+        <header class="hero-card">
+          <div class="hero-grid">
+            <div>
+              <p class="eyebrow">Symphony Observability</p>
+              <h1 class="hero-title">Issue not found</h1>
+              <p class="hero-copy">
+                No running or retrying entry exists for <span class="mono">{{ .Identifier }}</span>.
+              </p>
+              <p class="hero-copy"><a class="issue-link" href="/">&larr; Back to dashboard</a></p>
+            </div>
+          </div>
+        </header>
+      </section>
+    </main>
+  </body>
+</html>
+{{ end }}
