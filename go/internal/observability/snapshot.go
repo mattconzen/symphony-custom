@@ -13,6 +13,15 @@ type Snapshot struct {
 	RateLimits  any            `json:"rate_limits"`
 	Running     []RunningEntry `json:"running"`
 	Retrying    []RetryEntry   `json:"retrying"`
+	Polling     Polling        `json:"polling"`
+}
+
+// Polling mirrors Elixir Presenter's `polling` map: a snapshot of the
+// orchestrator poll-loop state surfaced in the dashboard header.
+type Polling struct {
+	Checking       bool `json:"checking"`
+	PollIntervalMs int  `json:"poll_interval_ms"`
+	NextPollInMs   int  `json:"next_poll_in_ms"`
 }
 
 // Counts mirrors Elixir snapshot.counts.

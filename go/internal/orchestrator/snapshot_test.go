@@ -112,6 +112,13 @@ func TestBuildSnapshot_GoldenJSON(t *testing.T) {
 	// Force GeneratedAt to the fixture's value so the marshaled bytes are
 	// stable; we don't need to assert wall-clock here.
 	snap.GeneratedAt = fixedNow
+	// Force Polling to the fixture's values (BuildSnapshot derives these from
+	// config + lastPollAt; this golden test isn't covering that derivation).
+	snap.Polling = observability.Polling{
+		Checking:       false,
+		PollIntervalMs: 2000,
+		NextPollInMs:   1500,
+	}
 
 	got, err := json.MarshalIndent(snap, "", "  ")
 	require.NoError(t, err)

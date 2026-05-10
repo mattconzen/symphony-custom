@@ -65,5 +65,10 @@
       "worker_host": null,
       "workspace_path": null
     }
-  ]
+  ],
+  "polling": {
+    "checking": false,
+    "poll_interval_ms": 2000,
+    "next_poll_in_ms": 1500
+  }
 }

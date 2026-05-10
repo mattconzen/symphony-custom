@@ -96,6 +96,11 @@ func fixedSnapshot(t *testing.T) observability.Snapshot {
 				WorkspacePath:   nil,
 			},
 		},
+		Polling: observability.Polling{
+			Checking:       false,
+			PollIntervalMs: 2000,
+			NextPollInMs:   1500,
+		},
 	}
 }
 
