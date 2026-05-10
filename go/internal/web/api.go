@@ -49,27 +49,13 @@ func (h *Handler) handleAPIIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snap := h.orch.Snapshot()
-	var running *observability.RunningEntry
-	for i := range snap.Running {
-		if snap.Running[i].IssueIdentifier == id {
-			running = &snap.Running[i]
-			break
-		}
-	}
-	var retry *observability.RetryEntry
-	for i := range snap.Retrying {
-		if snap.Retrying[i].IssueIdentifier == id {
-			retry = &snap.Retrying[i]
-			break
-		}
-	}
-	if running == nil && retry == nil {
+	payload, ok := buildIssuePayload(h.orch.Snapshot(), id, "")
+	if !ok {
 		writeAPIError(w, http.StatusNotFound, "issue_not_found", "Issue not found")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, buildIssuePayload(id, running, retry))
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // handleAPIRefresh acknowledges a refresh request. The Go orchestrator polls
@@ -148,7 +134,29 @@ type issuePayload struct {
 	Tracked         map[string]any     `json:"tracked"`
 }
 
-func buildIssuePayload(id string, running *observability.RunningEntry, retry *observability.RetryEntry) issuePayload {
+// buildIssuePayload extracts and projects the per-issue payload for
+// identifier id from snap. Returns ok=false when neither a running nor a
+// retry entry matches. workspaceRoot is reserved for future synthesis of
+// workspace.path when neither entry carries a path; pass "" to skip.
+func buildIssuePayload(snap observability.Snapshot, id string, workspaceRoot string) (issuePayload, bool) {
+	var running *observability.RunningEntry
+	for i := range snap.Running {
+		if snap.Running[i].IssueIdentifier == id {
+			running = &snap.Running[i]
+			break
+		}
+	}
+	var retry *observability.RetryEntry
+	for i := range snap.Retrying {
+		if snap.Retrying[i].IssueIdentifier == id {
+			retry = &snap.Retrying[i]
+			break
+		}
+	}
+	if running == nil && retry == nil {
+		return issuePayload{}, false
+	}
+
 	out := issuePayload{
 		IssueIdentifier: id,
 		IssueID:         issueIDFromEntries(running, retry),
@@ -183,7 +191,7 @@ func buildIssuePayload(id string, running *observability.RunningEntry, retry *ob
 		}
 		out.LastError = retry.Error
 	}
-	return out
+	return out, true
 }
 
 func issueIDFromEntries(running *observability.RunningEntry, retry *observability.RetryEntry) string {
