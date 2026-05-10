@@ -291,6 +291,53 @@ pre,
   50%      { opacity: 0.35; }
 }
 
+.refresh-button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.6rem;
+  padding: 0.22rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--card-muted);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow: none;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+.refresh-button:hover {
+  transform: none;
+  box-shadow: none;
+  background: white;
+  border-color: var(--muted);
+  color: var(--ink);
+}
+
+.refresh-button:disabled,
+.refresh-button[disabled] {
+  cursor: not-allowed;
+  opacity: 0.55;
+  background: var(--card-muted);
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+.refresh-button.htmx-request,
+.refresh-button[hx-request] {
+  opacity: 0.55;
+  cursor: progress;
+}
+
 .metric-grid {
   display: grid;
   gap: 0.85rem;

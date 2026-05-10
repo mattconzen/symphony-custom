@@ -19,6 +19,12 @@
                 <span class="ws-status-dot"></span>
                 <span class="ws-status-label">Live</span>
               </span>
+              <button
+                class="refresh-button"
+                hx-post="/api/v1/refresh"
+                hx-swap="none"
+                title="Trigger an immediate poll"
+              >⟳ Refresh</button>
               <div id="header-status" class="header-status">
                 {{ template "header-status" . }}
               </div>
