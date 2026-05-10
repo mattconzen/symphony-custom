@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,14 +259,20 @@ func (a *Adapter) FetchIssueStatesByIDs(ctx context.Context, ids []string) ([]do
 		if state != "Done" {
 			sentinel := filepath.Join(dirPath, ".symphony-done")
 			if _, statErr := os.Stat(sentinel); statErr == nil {
-				if err := os.Remove(sentinel); err != nil {
-					return nil, fmt.Errorf("openspec: removing .symphony-done for %s: %w", id, err)
+				accept, reason := tasksAcceptSentinel(filepath.Join(dirPath, "tasks.md"))
+				if !accept {
+					slog.Warn("openspec: ignoring .symphony-done sentinel",
+						"id", id, "reason", reason)
+				} else {
+					if err := os.Remove(sentinel); err != nil {
+						return nil, fmt.Errorf("openspec: removing .symphony-done for %s: %w", id, err)
+					}
+					if err := a.UpdateIssueState(ctx, id, "Done"); err != nil {
+						return nil, fmt.Errorf("openspec: auto-archiving %s on sentinel: %w", id, err)
+					}
+					dirPath = filepath.Join(a.archiveDir(), id)
+					state = "Done"
 				}
-				if err := a.UpdateIssueState(ctx, id, "Done"); err != nil {
-					return nil, fmt.Errorf("openspec: auto-archiving %s on sentinel: %w", id, err)
-				}
-				dirPath = filepath.Join(a.archiveDir(), id)
-				state = "Done"
 			}
 		}
 		issue, err := a.issueFromSlug(id, dirPath, state)
@@ -538,6 +545,33 @@ func extractH1(content []byte) string {
 		}
 	}
 	return ""
+}
+
+// tasksAcceptSentinel decides whether a `.symphony-done` sentinel should be
+// honored given the contents of the change's tasks.md (if any). It returns
+// (true, "") when archiving is OK, and (false, reason) when the sentinel
+// should be left in place — typically because tasks.md still contains
+// unchecked `- [ ]` items, meaning the agent declared completion before
+// finishing its checklist. A missing or unreadable tasks.md is treated as
+// "no checklist to verify" and accepts the sentinel.
+func tasksAcceptSentinel(tasksPath string) (bool, string) {
+	data, err := os.ReadFile(tasksPath)
+	if err != nil {
+		// No tasks.md, or unreadable: nothing to verify against.
+		return true, ""
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	unchecked := 0
+	for scanner.Scan() {
+		trimmed := strings.TrimLeft(scanner.Text(), " \t")
+		if strings.HasPrefix(trimmed, "- [ ]") || strings.HasPrefix(trimmed, "* [ ]") {
+			unchecked++
+		}
+	}
+	if unchecked > 0 {
+		return false, fmt.Sprintf("tasks.md has %d unchecked item(s)", unchecked)
+	}
+	return true, ""
 }
 
 // extractTasksSection extracts the content under the "## Tasks" heading from

@@ -137,8 +137,8 @@ type issuePayload struct {
 }
 
 // buildIssuePayload extracts and projects the per-issue payload for
-// identifier id from snap. Returns ok=false when neither a running nor a
-// retry entry matches. When neither entry carries a workspace path and
+// identifier id from snap. Returns ok=false when no running, retry, or
+// kanban entry matches. When neither entry carries a workspace path and
 // workspaceRoot is non-empty, workspace.path is synthesized from
 // `filepath.Join(workspaceRoot, Issue{Identifier: id}.WorkspaceKey())` —
 // matching the path the orchestrator will create on first dispatch.
@@ -158,6 +158,18 @@ func buildIssuePayload(snap observability.Snapshot, id string, workspaceRoot str
 		}
 	}
 	if running == nil && retry == nil {
+		if card, ok := findKanbanCard(snap, id); ok {
+			return issuePayload{
+				IssueIdentifier: card.IssueIdentifier,
+				IssueID:         card.IssueID,
+				Status:          card.State,
+				Workspace:       buildWorkspace(id, nil, nil, workspaceRoot),
+				Attempts:        issueAttempts{},
+				Logs:            issueLogs{AgentSessionLogs: []any{}},
+				RecentEvents:    []issueRecentEvent{},
+				Tracked:         map[string]any{},
+			}, true
+		}
 		return issuePayload{}, false
 	}
 
@@ -254,6 +266,22 @@ func buildWorkspace(id string, running *observability.RunningEntry, retry *obser
 		path = &synth
 	}
 	return issueWorkspace{Path: path, Host: host}
+}
+
+// findKanbanCard returns the first KanbanCard across all columns whose
+// IssueIdentifier matches id. The kanban is the source of truth for issues
+// Symphony has discovered but is not actively dispatching (Backlog, Ready,
+// In Review, Done). Used as a fallback by buildIssuePayload so /issue/{id}
+// renders for every known issue, not only those currently Running/Retrying.
+func findKanbanCard(snap observability.Snapshot, id string) (observability.KanbanCard, bool) {
+	for _, col := range snap.Kanban {
+		for _, card := range col.Cards {
+			if card.IssueIdentifier == id {
+				return card, true
+			}
+		}
+	}
+	return observability.KanbanCard{}, false
 }
 
 func buildRecentEvents(running *observability.RunningEntry) []issueRecentEvent {

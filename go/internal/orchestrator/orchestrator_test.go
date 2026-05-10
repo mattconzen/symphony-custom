@@ -146,6 +146,58 @@ func TestOrchestrator_WorkspaceCreated(t *testing.T) {
 	cancel()
 }
 
+func TestOrchestrator_TranscriptSurvivesWorkspaceRemoval(t *testing.T) {
+	cfg := buildCfg(t)
+
+	issue := domain.Issue{
+		ID:         "issue-tx",
+		Identifier: "TX-1",
+		State:      "In Progress",
+	}
+	tr := memory.New([]domain.Issue{issue})
+	rt := mock.New(mock.MockOpts{
+		Turns: []mock.TurnScript{{Status: agent.TurnCompleted}},
+	})
+
+	wsMgr := workspace.NewManager(cfg)
+	log := observability.New(&bytes.Buffer{})
+	orch := orchestrator.New(cfg, tr, rt, wsMgr, log)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = orch.Run(ctx) }()
+
+	rec, ok := rt.(recorderIface)
+	require.True(t, ok)
+	eventually(t, 3*time.Second, func() bool {
+		return rec.RecordedTurnCount() >= 1
+	})
+
+	// Transcript must be written to the new sibling location, not inside
+	// the workspace dir (which gets RemoveAll'd on issue completion).
+	transcriptPath := orch.TranscriptPathForIdentifier("TX-1")
+	assert.Contains(t, transcriptPath, "/.transcripts/")
+	assert.NotContains(t, transcriptPath, "/.symphony/transcript.jsonl")
+
+	eventually(t, 2*time.Second, func() bool {
+		_, err := os.Stat(transcriptPath)
+		return err == nil
+	})
+
+	// Remove the workspace as the reconciler would on terminal state.
+	require.NoError(t, wsMgr.RemoveForIssue(ctx, issue))
+
+	wsPath := cfg.Workspace.Root + "/" + issue.WorkspaceKey()
+	if _, err := os.Stat(wsPath); !os.IsNotExist(err) {
+		t.Fatalf("workspace dir should have been removed: stat err=%v", err)
+	}
+
+	_, err := os.Stat(transcriptPath)
+	assert.NoError(t, err, "transcript should survive workspace removal")
+
+	cancel()
+}
+
 func TestOrchestrator_RequestRefresh(t *testing.T) {
 	cfg := buildCfg(t)
 	tr := memory.New(nil)

@@ -136,6 +136,40 @@ func TestDashboard_RefreshButton(t *testing.T) {
 	}
 }
 
+func TestDashboard_ThemeToggle(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(observability.Snapshot{})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	got := string(body)
+	for _, marker := range []string{
+		`id="theme-toggle"`,
+		`localStorage`,
+		`symphony-theme`,
+		// dataset.theme is the JS API for the data-theme attribute; the
+		// boot script in _head.html.tmpl sets it via documentElement.dataset.
+		`dataset.theme`,
+		`prefers-color-scheme`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("body missing %q", marker)
+		}
+	}
+}
+
 func TestDashboard_PollingIndicator_Idle(t *testing.T) {
 	t.Parallel()
 
@@ -269,6 +303,47 @@ func TestIssueDetailPage_NotFound(t *testing.T) {
 		`Issue not found`,
 		`UNKNOWN-99`,
 		`href="/"`,
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Errorf("body missing %q", marker)
+		}
+	}
+}
+
+func TestIssueDetailPage_RendersKanbanOnlyIssue(t *testing.T) {
+	t.Parallel()
+
+	snap := sampleSnapshot()
+	snap.Kanban = []observability.KanbanColumn{{
+		Key:   "done",
+		Title: "Done",
+		Cards: []observability.KanbanCard{{
+			IssueID:         "issue-9",
+			IssueIdentifier: "DONE-9",
+			Title:           "Archived work item",
+			State:           "Done",
+			URL:             "file:///tmp/archive/DONE-9/proposal.md",
+		}},
+	}}
+
+	h := newTestHandler(snap)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/issue/DONE-9")
+	if err != nil {
+		t.Fatalf("GET issue page: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, marker := range []string{
+		`DONE-9`,
+		`Done</span>`,
+		`No active session.`,
 	} {
 		if !strings.Contains(string(body), marker) {
 			t.Errorf("body missing %q", marker)

@@ -414,14 +414,16 @@ func truncateOutput(out []byte, maxBytes int) string {
 }
 
 // transcriptPath returns the absolute path to the per-issue transcript
-// JSONL file inside the workspace's .symphony/ subdirectory. Returns ""
-// when the workspace root is unset (test orchestrators).
+// JSONL file. Transcripts live under <workspace_root>/.transcripts/<key>.jsonl
+// — sibling to per-issue workspace dirs, not inside them — so RemoveForIssue
+// (which RemoveAlls <workspace_root>/<key>) does not delete the audit trail.
+// Returns "" when the workspace root is unset (test orchestrators).
 func (o *Orchestrator) transcriptPath(issue domain.Issue) string {
 	root := o.cfg.Workspace.Root
 	if root == "" {
 		return ""
 	}
-	return filepath.Join(root, issue.WorkspaceKey(), ".symphony", "transcript.jsonl")
+	return filepath.Join(root, ".transcripts", issue.WorkspaceKey()+".jsonl")
 }
 
 // TranscriptPathForIdentifier returns the transcript file path for the
@@ -433,5 +435,5 @@ func (o *Orchestrator) TranscriptPathForIdentifier(identifier string) string {
 		return ""
 	}
 	key := domain.Issue{Identifier: identifier}.WorkspaceKey()
-	return filepath.Join(root, key, ".symphony", "transcript.jsonl")
+	return filepath.Join(root, ".transcripts", key+".jsonl")
 }

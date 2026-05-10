@@ -192,13 +192,27 @@ func TestUpdateIssueState_TerminalAndBack(t *testing.T) {
 }
 
 // TestFetchIssueStatesByIDs_SentinelAutoArchives verifies SPEC §11.7: when
-// changes/<slug>/.symphony-done is present, FetchIssueStatesByIDs MUST remove
-// the sentinel, move the slug to archive/, and return state="Done" in the same
-// call. This is the in-band completion signal a coding agent uses to tell the
-// tracker "I'm done; archive me."
+// changes/<slug>/.symphony-done is present and tasks.md has no unchecked
+// items, FetchIssueStatesByIDs MUST remove the sentinel, move the slug to
+// archive/, and return state="Done" in the same call. This is the in-band
+// completion signal a coding agent uses to tell the tracker "I'm done;
+// archive me."
 func TestFetchIssueStatesByIDs_SentinelAutoArchives(t *testing.T) {
 	root := t.TempDir()
 	setupFixtures(t, root)
+
+	// setupFixtures writes tasks.md with unchecked items; mark them done so
+	// the sentinel is honored.
+	tasksDone := `# Tasks for Add Foo
+
+## Tasks
+- [x] step 1
+- [x] step 2
+
+## Notes
+Some notes here.
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, "changes", "add-foo", "tasks.md"), []byte(tasksDone), 0o644))
 
 	sentinel := filepath.Join(root, "changes", "add-foo", ".symphony-done")
 	require.NoError(t, os.WriteFile(sentinel, nil, 0o644))
@@ -214,6 +228,54 @@ func TestFetchIssueStatesByIDs_SentinelAutoArchives(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(root, "changes", "add-foo"))
 	assert.DirExists(t, filepath.Join(root, "archive", "add-foo"))
 	assert.NoFileExists(t, filepath.Join(root, "archive", "add-foo", ".symphony-done"))
+}
+
+// TestFetchIssueStatesByIDs_SentinelRejectedWhenTasksUnchecked verifies that
+// when tasks.md still contains unchecked `- [ ]` items, the sentinel is
+// LEFT IN PLACE and the issue is NOT archived. Once the agent ticks the
+// remaining items, the next poll will accept the sentinel.
+func TestFetchIssueStatesByIDs_SentinelRejectedWhenTasksUnchecked(t *testing.T) {
+	root := t.TempDir()
+	setupFixtures(t, root) // tasks.md has two `- [ ]` items.
+
+	sentinel := filepath.Join(root, "changes", "add-foo", ".symphony-done")
+	require.NoError(t, os.WriteFile(sentinel, nil, 0o644))
+
+	a, err := openspec.New(makeCfg(root))
+	require.NoError(t, err)
+
+	issues, err := a.FetchIssueStatesByIDs(context.Background(), []string{"add-foo"})
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "Todo", issues[0].State, "issue must stay in Todo while tasks are unchecked")
+
+	// Slug must remain under changes/, sentinel must remain on disk so the
+	// next poll re-evaluates after the agent ticks more items.
+	assert.DirExists(t, filepath.Join(root, "changes", "add-foo"))
+	assert.NoDirExists(t, filepath.Join(root, "archive", "add-foo"))
+	assert.FileExists(t, sentinel)
+}
+
+// TestFetchIssueStatesByIDs_SentinelAcceptedWhenNoTasksFile verifies that a
+// missing tasks.md is treated as "no checklist to verify" — the sentinel is
+// honored. This preserves backward-compat for proposals authored without a
+// tasks.md.
+func TestFetchIssueStatesByIDs_SentinelAcceptedWhenNoTasksFile(t *testing.T) {
+	root := t.TempDir()
+	setupFixtures(t, root)
+	require.NoError(t, os.Remove(filepath.Join(root, "changes", "add-foo", "tasks.md")))
+
+	sentinel := filepath.Join(root, "changes", "add-foo", ".symphony-done")
+	require.NoError(t, os.WriteFile(sentinel, nil, 0o644))
+
+	a, err := openspec.New(makeCfg(root))
+	require.NoError(t, err)
+
+	issues, err := a.FetchIssueStatesByIDs(context.Background(), []string{"add-foo"})
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "Done", issues[0].State)
+	assert.DirExists(t, filepath.Join(root, "archive", "add-foo"))
 }
 
 // TestUpdateIssueState_NoOp verifies that moving an issue to its current
