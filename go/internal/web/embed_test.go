@@ -60,9 +60,9 @@ func TestDashboardTemplateParses(t *testing.T) {
 func TestDashboardTemplateReferencesRequiredIDs(t *testing.T) {
 	t.Parallel()
 
-	body, err := fs.ReadFile(TemplatesFS, "templates/dashboard.html.tmpl")
+	dashboard, err := fs.ReadFile(TemplatesFS, "templates/dashboard.html.tmpl")
 	if err != nil {
-		t.Fatalf("read template: %v", err)
+		t.Fatalf("read dashboard template: %v", err)
 	}
 	for _, id := range []string{
 		`id="metric-grid"`,
@@ -71,19 +71,30 @@ func TestDashboardTemplateReferencesRequiredIDs(t *testing.T) {
 		`id="rate-limits"`,
 		`id="header-status"`,
 	} {
-		if !bytes.Contains(body, []byte(id)) {
-			t.Errorf("template missing required marker %q", id)
+		if !bytes.Contains(dashboard, []byte(id)) {
+			t.Errorf("dashboard template missing required marker %q", id)
 		}
 	}
 	for _, marker := range []string{
 		`hx-ext="ws"`,
 		`ws-connect="/ws"`,
+	} {
+		if !bytes.Contains(dashboard, []byte(marker)) {
+			t.Errorf("dashboard template missing required marker %q", marker)
+		}
+	}
+
+	head, err := fs.ReadFile(TemplatesFS, "templates/_head.html.tmpl")
+	if err != nil {
+		t.Fatalf("read head partial: %v", err)
+	}
+	for _, marker := range []string{
 		`/static/htmx.min.js`,
 		`/static/htmx-ws.min.js`,
 		`/static/dashboard.css`,
 	} {
-		if !bytes.Contains(body, []byte(marker)) {
-			t.Errorf("template missing required marker %q", marker)
+		if !bytes.Contains(head, []byte(marker)) {
+			t.Errorf("head partial missing required marker %q", marker)
 		}
 	}
 }
