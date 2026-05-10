@@ -1,0 +1,12 @@
+.web-run/
+symphony-web
+.web-real/
+.web-run-v2/
+
+# Go build artifacts
+go/symphony
+go/symphony.pid
+.gocache/
+
+# Runtime logs
+.smoke.log
