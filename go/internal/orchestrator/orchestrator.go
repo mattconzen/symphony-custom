@@ -59,6 +59,11 @@ type Orchestrator struct {
 	codexTotals   observability.TokenTotals
 	rateLimits    any
 
+	// refreshC carries out-of-band refresh requests. Capacity 1 so a single
+	// pending request coalesces additional calls. Read by Run's select; written
+	// by RequestRefresh.
+	refreshC chan struct{}
+
 	// onUpdate is fired (outside the lock) whenever observable orchestrator
 	// state changes — dispatch start, turn complete, dispatch finish,
 	// reconcile state-change, retry scheduled. Mirrors the Elixir
@@ -84,6 +89,19 @@ func New(
 		running:       make(map[string]*runEntry),
 		claimed:       make(map[string]struct{}),
 		retryAttempts: make(map[string]*domain.RetryEntry),
+		refreshC:      make(chan struct{}, 1),
+	}
+}
+
+// RequestRefresh schedules an immediate poll on the orchestrator. Returns true
+// if a fresh refresh was queued, false if one is already pending (coalesced).
+// Safe to call from any goroutine; non-blocking.
+func (o *Orchestrator) RequestRefresh() bool {
+	select {
+	case o.refreshC <- struct{}{}:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -197,6 +215,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			o.tick(ctx)
+		case <-o.refreshC:
+			o.tick(ctx)
+			ticker.Reset(interval)
 		}
 	}
 }

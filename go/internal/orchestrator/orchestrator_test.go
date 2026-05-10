@@ -146,6 +146,56 @@ func TestOrchestrator_WorkspaceCreated(t *testing.T) {
 	cancel()
 }
 
+func TestOrchestrator_RequestRefresh(t *testing.T) {
+	cfg := buildCfg(t)
+	tr := memory.New(nil)
+	rt := mock.New(mock.MockOpts{Turns: []mock.TurnScript{{Status: agent.TurnCompleted}}})
+	wsMgr := workspace.NewManager(cfg)
+	log := observability.New(&bytes.Buffer{})
+	orch := orchestrator.New(cfg, tr, rt, wsMgr, log)
+
+	// Without Run, refreshC is never drained: first send queues, second coalesces.
+	assert.True(t, orch.RequestRefresh(), "first call must enqueue (returns true)")
+	assert.False(t, orch.RequestRefresh(), "second call must coalesce (returns false)")
+
+	// Run the orchestrator with a long poll interval so we can attribute the
+	// next dispatch unambiguously to a refresh trigger rather than a tick.
+	cfg.Polling.IntervalMs = 60_000
+	issue := domain.Issue{ID: "i-refresh", Identifier: "RF-1", State: "In Progress"}
+	tr2 := memory.New([]domain.Issue{issue})
+	orch2 := orchestrator.New(cfg, tr2, rt, wsMgr, log)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan struct{})
+	go func() { _ = orch2.Run(ctx); close(done) }()
+
+	rec, ok := rt.(recorderIface)
+	require.True(t, ok)
+
+	// Wait for the initial immediate tick to drain the candidate, then trigger
+	// a refresh and observe the second dispatch attempt. The mock memory
+	// tracker keeps yielding the same issue, but reconcile + dispatch run on
+	// every tick — so we just need turn count to grow past the initial.
+	eventually(t, 3*time.Second, func() bool { return rec.RecordedTurnCount() >= 1 })
+	beforeTriggerCount := rec.RecordedTurnCount()
+
+	// After the initial tick is over, refreshC should be drainable again.
+	assert.True(t, orch2.RequestRefresh(), "third call (after drain) must enqueue again")
+
+	// Tick interval is 60s; if we see another turn, it can only be from refresh.
+	eventually(t, 3*time.Second, func() bool {
+		return rec.RecordedTurnCount() > beforeTriggerCount
+	})
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrator did not shut down in 2s")
+	}
+}
+
 func TestOrchestrator_MultipleIssues(t *testing.T) {
 	cfg := buildCfg(t)
 

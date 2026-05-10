@@ -1956,13 +1956,16 @@ Normative requirements:
 - `/static/{file}` MUST reject path traversal attempts (`..`, embedded slashes) with `404`. The
   set of reachable files is restricted to the contents of the embedded `static/` directory.
 
+Refresh semantics:
+
+- `POST /api/v1/refresh` schedules an immediate poll on the orchestrator. The 202 envelope's
+  `coalesced` field is `true` when a refresh was already pending (the request was
+  deduplicated against the in-flight one); otherwise `false`. The poll runs the same
+  reconcile + candidate-fetch + dispatch path as a regular tick, and the regular tick cadence
+  resumes from the moment of the refresh.
+
 #### v0 deviations from the Elixir reference
 
-- `POST /api/v1/refresh` returns `202` unconditionally and does NOT trigger an out-of-band
-  reconcile in the Go orchestrator — the orchestrator polls on its own tick interval and there
-  is currently no plumbed refresh trigger. The 202 envelope therefore acts as an
-  accept-and-no-op acknowledgement. This MAY change in a later phase if an out-of-band refresh
-  trigger is added; consumers MUST accept that the response shape stays the same regardless.
 - `GET /api/v1/{issue_identifier}` returns `workspace.path` as the resolved or synthesized
   workspace directory for the issue. When neither the running nor retrying entry has recorded
   a path, the orchestrator's configured workspace root joined with the issue identifier's
