@@ -34,6 +34,7 @@ type specJob struct {
 	mu       sync.Mutex
 	identifier string
 	body     string
+	etag     string
 	err      error
 	done     bool
 	startedAt time.Time
@@ -173,8 +174,27 @@ func (h *Handler) handleAPIGenerateSpec(w http.ResponseWriter, r *http.Request) 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		body, err := h.specGen.Generate(ctx, domain.Issue{Identifier: id})
+		var etag string
+		// Persist successful generations via the tracker's SpecWriter so the
+		// spec survives a page reload. If the tracker doesn't support spec
+		// writes, we still surface the body to the client — it just won't
+		// be saved.
+		if err == nil {
+			if rw, ok := h.trk.(SpecReadWriter); ok {
+				writeCtx, writeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				newEtag, writeErr := rw.WriteSpec(writeCtx, id, body, "")
+				writeCancel()
+				if writeErr != nil {
+					err = writeErr
+				} else {
+					etag = newEtag
+					h.orch.RequestRefresh()
+				}
+			}
+		}
 		job.mu.Lock()
 		job.body = body
+		job.etag = etag
 		job.err = err
 		job.done = true
 		job.mu.Unlock()
@@ -213,6 +233,9 @@ func (h *Handler) handleAPIGenerateSpecStatus(w http.ResponseWriter, r *http.Req
 	default:
 		resp["status"] = "done"
 		resp["body"] = job.body
+		if job.etag != "" {
+			resp["etag"] = job.etag
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

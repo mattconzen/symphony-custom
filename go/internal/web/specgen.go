@@ -77,9 +77,18 @@ func (g *runtimeSpecGenerator) Generate(ctx context.Context, issue domain.Issue)
 
 	var buf strings.Builder
 	cb := func(ev agent.Event) {
-		if ev.Kind == agent.EventAssistantMessage {
-			fmt.Fprintf(&buf, "%v\n", ev.Payload)
+		if ev.Kind != agent.EventAssistantMessage {
+			return
 		}
+		// Runtimes are expected to deliver assistant text as a string payload;
+		// fall back to %v only when a runtime hands us something else, to
+		// avoid printing raw []byte/struct contents into the spec body.
+		if s, ok := ev.Payload.(string); ok {
+			buf.WriteString(s)
+			buf.WriteByte('\n')
+			return
+		}
+		fmt.Fprintf(&buf, "%v\n", ev.Payload)
 	}
 	if _, err := g.rt.RunTurn(ctx, sess, prompt, issue, cb); err != nil {
 		return "", fmt.Errorf("specgen: run turn: %w", err)

@@ -251,7 +251,7 @@ func htmlEscapeAttr(s string) string {
 // WebSocket text message. One message per update keeps client-side
 // bookkeeping minimal and avoids reordering.
 func (h *Handler) writeFragments(ctx context.Context, conn *websocket.Conn) error {
-	view := dashboardView{Snapshot: h.orch.Snapshot()}
+	view := dashboardView{Snapshot: h.orch.Snapshot(), CanCreateIssue: h.canCreate()}
 	payload, err := renderFragments(h.tmpl, view)
 	if err != nil {
 		return err
