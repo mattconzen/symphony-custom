@@ -166,13 +166,13 @@ func (r *Runtime) writePrompt(impl *sessionImpl, prompt string) error {
 // dispatchEvent maps one Claude event to a Symphony event and emits it. Returns
 // (true, result) when the turn is complete (success or failure).
 func (r *Runtime) dispatchEvent(ev claudeEvent, sessionID *string, cb agent.EventCallback) (bool, agent.TurnResult) {
-	emit := func(kind agent.EventKind) {
+	emitPayload := func(kind agent.EventKind, payload any) {
 		if cb != nil {
 			cb(agent.Event{
 				Kind:      kind,
 				Timestamp: time.Now().UTC(),
 				SessionID: *sessionID,
-				Payload:   ev,
+				Payload:   payload,
 			})
 		}
 	}
@@ -181,17 +181,44 @@ func (r *Runtime) dispatchEvent(ev claudeEvent, sessionID *string, cb agent.Even
 	case "system":
 		return r.handleSystem(ev, sessionID, cb)
 	case "assistant":
-		emit(agent.EventAssistantMessage)
+		// Surface assistant text as a plain string payload, mirroring the
+		// claude_sdk runtime. Consumers (e.g. spec-gen) rely on this contract
+		// to render Markdown rather than printing the raw event struct.
+		emitPayload(agent.EventAssistantMessage, extractAssistantText(ev.Message))
 	case "user":
-		emit(agent.EventToolResult)
+		emitPayload(agent.EventToolResult, ev)
 	case "result":
 		return r.handleResult(ev, *sessionID, cb)
 	case "__malformed__":
-		emit(agent.EventMalformed)
+		emitPayload(agent.EventMalformed, ev)
 	default:
-		emit(agent.EventOtherMessage)
+		emitPayload(agent.EventOtherMessage, ev)
 	}
 	return false, agent.TurnResult{}
+}
+
+// extractAssistantText pulls the concatenated text from an assistant message's
+// content blocks. Returns "" if the message is empty or unparseable.
+func extractAssistantText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var msg struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return ""
+	}
+	var parts []string
+	for _, blk := range msg.Content {
+		if blk.Type == "text" && blk.Text != "" {
+			parts = append(parts, blk.Text)
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 // handleSystem processes system events, updating the session ID on init.
